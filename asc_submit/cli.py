@@ -245,13 +245,16 @@ def cmd_cancel_submission(client: Client, args) -> None:
     print("submission cancelled")
 
 
-def cmd_run(client: Client, args) -> None:
+def cmd_run(client: Client | None, args) -> None:
     spec = load_spec(args.spec)
     if args.dry_run:
+        # Plan printing touches nothing, so main() skips client construction
+        # and this runs without any API key configured (see main()).
         print(f"plan for app {args.app}:")
         for line in spec_plan(spec):
             print(f"  - {line}")
         return
+    assert client is not None  # main() guarantees a client outside --dry-run
     run_spec(client, args.app, spec, submit_flag=args.submit, assume_yes=args.yes)
 
 
@@ -538,6 +541,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "upload":
             # xcodebuild path: no API key required.
             args.func(args)
+            return 0
+        if args.command == "run" and args.dry_run:
+            # --dry-run only prints the plan; keep it keyless so CI can
+            # validate a spec before any secret is configured.
+            args.func(None, args)
             return 0
         client = build_client(args)
         args.func(client, args)

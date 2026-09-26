@@ -1,3 +1,4 @@
+import io
 import json
 import tempfile
 import unittest
@@ -47,6 +48,23 @@ class LoadSpecTests(unittest.TestCase):
             "SUBMIT for review",
         ])
         png.unlink()
+
+
+class RunDryRunTests(unittest.TestCase):
+    def test_dry_run_needs_no_api_key(self):
+        import os
+
+        fd, spec = tempfile.mkstemp(suffix=".json")
+        Path(spec).write_text(json.dumps({"version": "1.0.0"}))
+        env = {k: v for k, v in os.environ.items() if not k.startswith("ASC_")}
+        try:
+            with mock.patch.dict(os.environ, env, clear=True):
+                with mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+                    rc = cli.main(["run", "6812783176", "--spec", spec, "--dry-run"])
+        finally:
+            Path(spec).unlink()
+        self.assertEqual(rc, 0)
+        self.assertIn("plan for app 6812783176", out.getvalue())
 
 
 class ReadTextTests(unittest.TestCase):
