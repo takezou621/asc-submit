@@ -1,0 +1,19 @@
+asc_submit/cli.py
+  s_360f71f052b76c::t_ff8999253c9766 234-281,372-375
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "609ac5090d6ff221060fbc1f31fc78979cebe366",
+  "prompts": {},
+  "sessions": {
+    "s_360f71f052b76c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "803ea967-ab4f-4d65-8a60-07094faaa856",
+        "model": "glm-5.3-flash"
+      },
+      "human_author": "takezou621 <takezou621@gmail.com>"
+    }
+  }
+}
