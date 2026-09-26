@@ -79,6 +79,17 @@ class SetLocalizationsKeywordsTests(unittest.TestCase):
         self.assertEqual(client.patched[0][1]["data"]["attributes"], {"keywords": "x"})
 
 
+class CreateVersionPlatformTests(unittest.TestCase):
+    def test_create_version_posts_mac_os_platform(self):
+        # The ASC API enum is MAC_OS; OS_X is rejected with HTTP 409 (found live
+        # when the CI workflow ran create-version for the first time).
+        client = FakeClient()
+        flows.create_version(client, "APP", "0.8.1")
+        path, body = client.posted[0]
+        self.assertEqual(path, "/v1/appStoreVersions")
+        self.assertEqual(body["data"]["attributes"]["platform"], "MAC_OS")
+
+
 class SetSubtitlesTests(unittest.TestCase):
     def _client(self, state="PREPARE_FOR_SUBMISSION"):
         return FakeClient(

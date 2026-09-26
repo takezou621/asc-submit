@@ -1,6 +1,6 @@
 {
   "version": "0.7.0",
-  "platform": "OS_X",
+  "platform": "MAC_OS",
   "releaseType": "AFTER_APPROVAL",
   "build": "8",
   "whatsNew": {

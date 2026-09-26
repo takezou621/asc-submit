@@ -173,7 +173,7 @@ asc-submit cancel-submission 6812783176 --version 0.7.0
 
 ## Notes for macOS apps
 
-- Platform defaults to `OS_X` (`--platform IOS` for iOS apps).
+- Platform defaults to `MAC_OS` (`--platform IOS` / `TV_OS` / `VISION_OS`).
 - Screenshot display type defaults to `APP_DESKTOP` (2880×1800 PNG/JPG).
 - Upload order defines display order — list files in the order you want them shown.
 
