@@ -30,6 +30,8 @@ class LoadSpecTests(unittest.TestCase):
             {
                 "version": "1.0.0",
                 "whatsNew": {"ja": "x"},
+                "keywords": {"ja": "録音,録画"},
+                "subtitles": {"ja": "サブタイトル", "en-US": "Subtitle"},
                 "screenshots": {"ja": [str(png)]},
                 "submit": True,
             }
@@ -39,6 +41,8 @@ class LoadSpecTests(unittest.TestCase):
         self.assertEqual(cli.spec_plan(spec), [
             "create/resolve version 1.0.0",
             "set What's New for: ja",
+            "set keywords for: ja",
+            "set subtitles for: en-US, ja (app-level)",
             "upload 1 screenshot(s) for ja",
             "SUBMIT for review",
         ])
