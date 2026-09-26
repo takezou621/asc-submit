@@ -281,7 +281,11 @@ def cmd_doctor(client: Client, args) -> None:
 
 def cmd_upload(args) -> None:
     """Archive the Xcode project and upload the build to ASC (no API key —
-    authentication goes through the Apple ID session used by xcodebuild)."""
+    authentication goes through the Apple ID session used by xcodebuild).
+
+    Receives no client: unlike the ASC API commands, this does not require
+    an API key, so main() skips build_client() for it.
+    """
     from pathlib import Path
 
     from . import xcode
@@ -473,6 +477,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        if args.command == "upload":
+            # xcodebuild path: no API key required.
+            args.func(args)
+            return 0
         client = build_client(args)
         args.func(client, args)
     except ApiError as err:

@@ -28,12 +28,17 @@ def build_archive_command(
     project: str | None = None,
     workspace: str | None = None,
     team_id: str | None = None,
+    code_sign_identity: str = "Apple Development",
 ) -> list[str]:
     """Assemble the ``xcodebuild archive`` argument list.
 
     ``--version`` / ``--build`` are passed as build settings
     (MARKETING_VERSION / CURRENT_PROJECT_VERSION), which works for any
     project whose Info.plist references those variables (the Xcode default).
+
+    ``code_sign_identity`` is always passed even with automatic signing:
+    projects that ship a manual ``CODE_SIGN_IDENTITY`` (e.g. a local dev
+    certificate) otherwise fail with "conflicting provisioning settings".
     """
     cmd = ["xcodebuild", "archive"]
     if workspace:
@@ -49,6 +54,7 @@ def build_archive_command(
         f"MARKETING_VERSION={version}",
         f"CURRENT_PROJECT_VERSION={build}",
         "CODE_SIGN_STYLE=Automatic",
+        f"CODE_SIGN_IDENTITY={code_sign_identity}",
         "-allowProvisioningUpdates",
     ]
     if team_id:
