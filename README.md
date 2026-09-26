@@ -65,6 +65,29 @@ nonexistent resource id — no side effects. It exits 0 only when the key can
 actually create versions, edit metadata and submit for review, so run it
 right after issuing a new key.
 
+## Archiving and uploading a build
+
+The App Store Connect API has no build-upload endpoint, so `asc-submit` also
+wraps `xcodebuild` for the first mile — archive the project and upload it with
+the Apple ID session from your signed-in Xcode (no `.p8` needed here):
+
+```sh
+asc-submit upload --project MyApp.xcodeproj --scheme MyApp \
+    --version 0.7.0 --build 9
+```
+
+- Version/build are passed as build settings (`MARKETING_VERSION` /
+  `CURRENT_PROJECT_VERSION`), so any project whose Info.plist references
+  those variables (the Xcode default) works.
+- The archived bundle is verified against the requested version/build before
+  upload (`--skip-version-check` to skip; `--archive-only` to stop after
+  archiving; `--from-archive path.xcarchive` to re-upload an existing archive).
+- Works for macOS (`--platform macOS`, default) and iOS.
+
+Projects with bespoke archive steps (generated projects, private package
+resolution, bundle-signing workarounds) keep their own archive script for that
+part and use asc-submit for everything after the upload.
+
 ## Quick start: one spec, whole release
 
 Write the release plan once (this file can live in your app's repository):

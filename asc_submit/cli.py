@@ -279,6 +279,74 @@ def cmd_doctor(client: Client, args) -> None:
     sys.exit(0 if all_ok else 1)
 
 
+def cmd_upload(args) -> None:
+    """Archive the Xcode project and upload the build to ASC (no API key —
+    authentication goes through the Apple ID session used by xcodebuild)."""
+    from pathlib import Path
+
+    from . import xcode
+
+    work_dir = Path(args.work_dir).resolve()
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.from_archive:
+        archive_path = Path(args.from_archive).resolve()
+        if not archive_path.is_dir():
+            raise SystemExit(f"archive not found: {archive_path}")
+    else:
+        if not args.project and not args.workspace:
+            raise SystemExit("--project or --workspace is required (or --from-archive)")
+        if args.project and args.workspace:
+            raise SystemExit("--project and --workspace are mutually exclusive")
+        archive_path = work_dir / f"{args.scheme}.xcarchive"
+        cmd = xcode.build_archive_command(
+            scheme=args.scheme,
+            configuration=args.configuration,
+            platform=args.platform,
+            version=args.version,
+            build=args.build,
+            derived_data=work_dir / "derived",
+            archive_path=archive_path,
+            project=args.project,
+            workspace=args.workspace,
+            team_id=args.team_id,
+        )
+        print("archiving …")
+        xcode.run_xcodebuild(cmd, quiet=not args.verbose)
+
+    app = xcode.find_app_in_archive(archive_path)
+    if not args.skip_version_check:
+        short, bundle_build = xcode.read_bundle_versions(app)
+        mismatches = []
+        if short != args.version:
+            mismatches.append(f"CFBundleShortVersionString={short} (expected {args.version})")
+        if bundle_build != args.build:
+            mismatches.append(f"CFBundleVersion={bundle_build} (expected {args.build})")
+        if mismatches:
+            raise SystemExit(
+                "archived bundle version mismatch: " + "; ".join(mismatches)
+                + ". The project probably hard-codes its Info.plist values instead of "
+                "using MARKETING_VERSION/CURRENT_PROJECT_VERSION build settings."
+            )
+        print(f"archived bundle verified: {app.name} {short} ({bundle_build})")
+
+    if args.archive_only:
+        print(f"archive-only: {archive_path}")
+        return
+
+    options_plist = work_dir / "exportOptions.plist"
+    xcode.write_export_options(options_plist, args.team_id)
+    print("uploading to App Store Connect …")
+    xcode.run_xcodebuild(
+        xcode.build_export_command(archive_path, work_dir / "export", options_plist),
+        quiet=not args.verbose,
+    )
+    print(
+        "upload finished. Wait for the build to reach VALID in App Store Connect "
+        "(asc-submit run will wait for you), then submit."
+    )
+
+
 def read_text(args) -> str:
     if args.text is not None and args.file is not None:
         raise SystemExit("--text and --file are mutually exclusive")
@@ -372,6 +440,23 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("doctor", "check whether this API key can ship a version (no side effects)")
     p.add_argument("app", help="Apple ID of the app, or its bundle ID")
     p.set_defaults(func=cmd_doctor)
+
+    # upload talks to xcodebuild, not the ASC API, so no auth arguments.
+    p = sub.add_parser("upload", help="archive the Xcode project and upload the build (no API key)")
+    p.add_argument("--project", help="path to .xcodeproj")
+    p.add_argument("--workspace", help="path to .xcworkspace (mutually exclusive with --project)")
+    p.add_argument("--scheme", required=True)
+    p.add_argument("--version", required=True, help="marketing version, e.g. 0.7.0")
+    p.add_argument("--build", required=True, help="build number, e.g. 9")
+    p.add_argument("--configuration", default="Release")
+    p.add_argument("--platform", default="macOS", choices=["macOS", "iOS"])
+    p.add_argument("--team-id", help="development team for automatic signing")
+    p.add_argument("--work-dir", default="build/asc-submit", help="scratch dir for derived data, archive and exportOptions")
+    p.add_argument("--archive-only", action="store_true", help="stop after archiving (no upload)")
+    p.add_argument("--from-archive", help="skip archiving; upload an existing .xcarchive")
+    p.add_argument("--skip-version-check", action="store_true", help="do not compare the archived bundle version")
+    p.add_argument("-v", "--verbose", action="store_true", help="print full xcodebuild output")
+    p.set_defaults(func=cmd_upload)
 
     p = add("run", "run a whole shipping plan from a JSON spec")
     p.add_argument("app", help="Apple ID of the app, or its bundle ID")
