@@ -1,0 +1,26 @@
+README.md
+  h_864205080385bc 176
+asc_submit/__init__.py
+  h_864205080385bc 3
+asc_submit/cli.py
+  h_864205080385bc 441
+asc_submit/flows.py
+  h_864205080385bc 16-18
+examples/spec.example.json
+  h_864205080385bc 3
+pyproject.toml
+  h_864205080385bc 7
+tests/test_flows.py
+  h_864205080385bc 82-92
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a0e2c4c4ba738c823f4cc3316dc8377046e9aa9c",
+  "prompts": {},
+  "humans": {
+    "h_864205080385bc": {
+      "author": "takezou621 <takezou621@gmail.com>"
+    }
+  }
+}
