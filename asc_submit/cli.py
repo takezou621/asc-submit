@@ -438,7 +438,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("app")
     p.add_argument("--version", required=True)
     p.add_argument("--release", default="AFTER_APPROVAL", help="AFTER_APPROVAL (default), MANUAL or SCHEDULED")
-    p.add_argument("--platform", default=flows.MACOS_PLATFORM, help="OS_X (default), IOS, TV_OS")
+    p.add_argument("--platform", default=flows.MACOS_PLATFORM, help="MAC_OS (default), IOS, TV_OS, VISION_OS")
     p.set_defaults(func=cmd_create_version)
 
     p = add("whatsnew", "set the What's New text for one locale")

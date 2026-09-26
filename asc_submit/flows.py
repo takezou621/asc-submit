@@ -13,7 +13,9 @@ import time
 
 from .client import ApiError, Client
 
-MACOS_PLATFORM = "OS_X"
+# App Store Connect API enum is "MAC_OS" (not "OS_X" — the latter is rejected
+# with HTTP 409 "not a valid value" when creating a version).
+MACOS_PLATFORM = "MAC_OS"
 RELEASE_TYPES = {"AFTER_APPROVAL", "MANUAL", "SCHEDULED"}
 # App Store Connect rejects unknown locales only at write time, so callers can
 # pass any locale their App record has enabled (e.g. ja, en-US, zh-Hans, ko,
