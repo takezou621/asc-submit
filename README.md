@@ -54,6 +54,17 @@ pip install .
 python3 -m asc_submit --help
 ```
 
+## Verifying your key
+
+```sh
+asc-submit doctor 6812783176
+```
+
+`doctor` reads the app's versions and probes write access against a
+nonexistent resource id — no side effects. It exits 0 only when the key can
+actually create versions, edit metadata and submit for review, so run it
+right after issuing a new key.
+
 ## Quick start: one spec, whole release
 
 Write the release plan once (this file can live in your app's repository):

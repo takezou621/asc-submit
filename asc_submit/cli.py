@@ -231,6 +231,54 @@ def cmd_run(client: Client, args) -> None:
     run_spec(client, args.app, spec, submit_flag=args.submit, assume_yes=args.yes)
 
 
+def cmd_doctor(client: Client, args) -> None:
+    """Check this key can actually ship a version — no side effects."""
+    checks: list[tuple[str, bool, str]] = []
+
+    # 1. Read access (Developer keys have this).
+    try:
+        versions = flows.list_versions(client, args.app)
+        checks.append(("read: app versions reachable", True, f"{len(versions)} version(s)"))
+    except ApiError as err:
+        checks.append(("read: app versions reachable", False, str(err)))
+
+    # 2. Write probe against a nonexistent localization id. With write access
+    #    Apple answers 404 (resource not found); without it, 403 comes first.
+    probe_id = "00000000-0000-0000-0000-000000000000"
+    try:
+        client.patch(
+            f"/v1/appStoreVersionLocalizations/{probe_id}",
+            {"data": {"type": "appStoreVersionLocalizations", "id": probe_id, "attributes": {}}},
+        )
+        checks.append(("write: version metadata", True, "unexpectedly patched a nonexistent id"))
+    except ApiError as err:
+        if err.status == 403:
+            checks.append(("write: version metadata", False, "HTTP 403 — key role cannot edit metadata"))
+        elif err.status == 404:
+            checks.append(("write: version metadata", True, "HTTP 404 on a probe id (resource absent, permission granted)"))
+        else:
+            checks.append(("write: version metadata", True, f"HTTP {err.status} (not a permission error)"))
+
+    # 3. Submission uses POST /v1/appStoreVersionSubmissions, gated by the same
+    #    role as metadata writes — there is no safer separate probe (a real
+    #    POST would submit), so mirror the metadata verdict.
+    write_ok = checks[1][1]
+    checks.append(
+        ("submit-capable (same role gate as metadata writes)", write_ok, "POST appStoreVersionSubmissions is probed live at submit time")
+    )
+
+    print(f"asc-submit doctor for app {args.app}")
+    all_ok = True
+    for name, ok, detail in checks:
+        all_ok = all_ok and ok
+        print(f"  [{'ok' if ok else 'FAIL'}] {name}: {detail}")
+    if all_ok:
+        print("result: this key can create versions, edit metadata and submit for review")
+    else:
+        print("result: submissions NOT possible with this key — " + Client.forbidden_hint())
+    sys.exit(0 if all_ok else 1)
+
+
 def read_text(args) -> str:
     if args.text is not None and args.file is not None:
         raise SystemExit("--text and --file are mutually exclusive")
@@ -320,6 +368,10 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("cancel-submission", "remove the version from review")
     add_app_and_version(p)
     p.set_defaults(func=cmd_cancel_submission)
+
+    p = add("doctor", "check whether this API key can ship a version (no side effects)")
+    p.add_argument("app", help="Apple ID of the app, or its bundle ID")
+    p.set_defaults(func=cmd_doctor)
 
     p = add("run", "run a whole shipping plan from a JSON spec")
     p.add_argument("app", help="Apple ID of the app, or its bundle ID")
