@@ -26,6 +26,8 @@ class FakeClient(mock.Mock):
     def _get_all(self, path, query=None):
         if path.startswith("/v1/appStoreVersions/") and path.endswith("/appStoreVersionLocalizations"):
             return self._version_localizations
+        if path == "/v1/apps/APP/appStoreVersions":
+            return []  # create_version resolves first; empty = does not exist yet
         if path == "/v1/apps/APP/appInfos":
             return self._app_infos
         if "/appInfoLocalizations" in path:
