@@ -1,0 +1,19 @@
+README.md
+  s_7e7dd78210f867::t_978abd3a73f655 108-115,134-135,139-154,163-164,189-190
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "de29329002c73f46f10de756c06b08c7c83d3a81",
+  "prompts": {},
+  "sessions": {
+    "s_7e7dd78210f867": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d52eed35-0ac1-4ccb-a3a2-9b37a2ae832e",
+        "model": "glm-5.3-flash"
+      },
+      "human_author": "takezou621 <takezou621@gmail.com>"
+    }
+  }
+}
