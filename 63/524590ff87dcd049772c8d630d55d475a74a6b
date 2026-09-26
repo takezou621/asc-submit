@@ -1,0 +1,21 @@
+asc_submit/client.py
+  s_cc24529b79f6d3::t_cda77df32c5777 1-194
+asc_submit/flows.py
+  s_cc24529b79f6d3::t_bb25b7414778f3 1-396
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "63524590ff87dcd049772c8d630d55d475a74a6b",
+  "prompts": {},
+  "sessions": {
+    "s_cc24529b79f6d3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f262d801-c3f6-4f8d-9b47-5b8778a8af17",
+        "model": "glm-5.3-flash"
+      },
+      "human_author": "takezou621 <takezou621@gmail.com>"
+    }
+  }
+}
