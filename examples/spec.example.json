@@ -1,0 +1,27 @@
+{
+  "version": "0.7.0",
+  "platform": "OS_X",
+  "releaseType": "AFTER_APPROVAL",
+  "build": "8",
+  "whatsNew": {
+    "ja": "安定性と信頼性を改善しました。",
+    "en-US": "Stability and reliability improvements."
+  },
+  "descriptions": {
+    "ja": "アプリの説明 (ja)。ASC は改行をそのまま表示します。",
+    "en-US": "The app description (en-US). Line breaks are shown as-is."
+  },
+  "reviewNotes": "How to test this build for review: …",
+  "screenshotDisplayType": "APP_DESKTOP",
+  "screenshotsReplace": true,
+  "screenshots": {
+    "ja": [
+      "shots/ja/01.png",
+      "shots/ja/02.png"
+    ],
+    "en-US": [
+      "shots/en/01.png"
+    ]
+  },
+  "submit": true
+}

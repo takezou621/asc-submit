@@ -1,0 +1,352 @@
+"""Command line interface.
+
+Authentication comes from the environment or global flags:
+
+    export ASC_KEY_PATH=~/.appstoreconnect/AuthKey_XYZ.p8
+    export ASC_KEY_ID=XYZ
+    export ASC_ISSUER=00000000-0000-0000-0000-000000000000
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+from . import auth, flows
+from .client import ApiError, Client
+
+ENV_KEY_PATH = "ASC_KEY_PATH"
+ENV_KEY_ID = "ASC_KEY_ID"
+ENV_ISSUER = "ASC_ISSUER"
+
+
+# ---------------------------------------------------------------------------
+# client construction
+
+
+def build_client(args) -> Client:
+    key_path = getattr(args, "key_path", None) or os.environ.get(ENV_KEY_PATH) or ""
+    key_id = getattr(args, "key_id", None) or os.environ.get(ENV_KEY_ID) or ""
+    issuer = getattr(args, "issuer", None) or os.environ.get(ENV_ISSUER) or ""
+    if not key_path:
+        raise SystemExit(
+            f"No API key configured. Set {ENV_KEY_PATH} / {ENV_KEY_ID} / {ENV_ISSUER} "
+            "or pass --key-path / --key-id / --issuer."
+        )
+    token = auth.make_token(key_id, issuer, key_path)
+    return Client(token=token, verbose=getattr(args, "verbose", False))
+
+
+def add_auth_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--key-path", help=f".p8 path or PEM content (env: {ENV_KEY_PATH})")
+    parser.add_argument("--key-id", help=f"API key id (env: {ENV_KEY_ID})")
+    parser.add_argument("--issuer", help=f"issuer id (env: {ENV_ISSUER})")
+    parser.add_argument("-v", "--verbose", action="store_true", help="log every HTTP request")
+
+
+# ---------------------------------------------------------------------------
+# spec support for the `run` subcommand
+
+
+def load_spec(path: str) -> dict:
+    spec = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not spec.get("version"):
+        raise SystemExit(f"{path}: 'version' is required")
+    for locale, files in (spec.get("screenshots") or {}).items():
+        for f in files:
+            if not Path(f).is_file():
+                raise SystemExit(f"{path}: screenshot file not found: {f}")
+    return spec
+
+
+def spec_plan(spec: dict) -> list[str]:
+    """Human-readable list of operations a `run` would perform."""
+    plan = [f"create/resolve version {spec['version']}"]
+    if spec.get("build"):
+        plan.append(f"attach build {spec['build']} (waiting for VALID state)")
+    if spec.get("whatsNew"):
+        plan.append(f"set What's New for: {', '.join(sorted(spec['whatsNew']))}")
+    if spec.get("descriptions"):
+        plan.append(f"set descriptions for: {', '.join(sorted(spec['descriptions']))}")
+    if spec.get("reviewNotes"):
+        plan.append("update App Review notes")
+    for locale, files in sorted((spec.get("screenshots") or {}).items()):
+        mode = "replace + upload" if spec.get("screenshotsReplace") else "upload"
+        plan.append(f"{mode} {len(files)} screenshot(s) for {locale}")
+    if spec.get("submit"):
+        plan.append("SUBMIT for review")
+    return plan
+
+
+def run_spec(client: Client, app_id: str, spec: dict, submit_flag: bool, assume_yes: bool) -> None:
+    version_string = spec["version"]
+    version = flows.create_version(
+        client, app_id, version_string, spec.get("releaseType", "AFTER_APPROVAL"), spec.get("platform", flows.MACOS_PLATFORM)
+    )
+    version_id = version["id"]
+
+    build = spec.get("build")
+    if build:
+        state = flows.find_build(client, app_id, build)
+        if not state or state["attributes"].get("processingState") != "VALID":
+            print(f"waiting for build {build} to become VALID …")
+            flows.wait_for_build(client, app_id, build)
+        flows.attach_build(client, version_id, app_id, build)
+        print(f"build {build} attached")
+
+    flows.set_localizations(client, version_id, spec.get("whatsNew"), spec.get("descriptions"))
+    if spec.get("whatsNew") or spec.get("descriptions"):
+        print("localizations updated")
+
+    if spec.get("reviewNotes"):
+        flows.set_review_notes(client, version_id, spec["reviewNotes"])
+        print("review notes updated")
+
+    display_type = spec.get("screenshotDisplayType", "APP_DESKTOP")
+    for locale, files in (spec.get("screenshots") or {}).items():
+        flows.set_screenshots(
+            client,
+            version_id,
+            locale,
+            files,
+            display_type=display_type,
+            replace=bool(spec.get("screenshotsReplace")),
+        )
+        print(f"screenshots for {locale}: {len(files)} uploaded")
+
+    if submit_flag or spec.get("submit"):
+        if not assume_yes and sys.stdin.isatty():
+            answer = input(f"Submit version {version_string} for App Review? [y/N] ")
+            if answer.strip().lower() not in {"y", "yes"}:
+                print("aborted — everything except the submission is done")
+                return
+        flows.submit_for_review(client, version_id)
+        print(f"version {version_string} submitted for review")
+
+
+# ---------------------------------------------------------------------------
+# subcommand handlers
+
+
+def cmd_versions(client: Client, args) -> None:
+    rows = flows.list_versions(client, args.app)
+    if not rows:
+        print("no App Store versions")
+        return
+    print(f"{'version':<12} {'state':<28} {'release':<16}")
+    for v in rows:
+        a = v["attributes"]
+        print(f"{a['versionString']:<12} {a['appStoreState']:<28} {a.get('releaseType', ''):<16}")
+
+
+def cmd_status(client: Client, args) -> None:
+    version = flows.require_version(client, args.app, args.version)
+    a = version["attributes"]
+    print(f"version   {a['versionString']} ({version['id']})")
+    print(f"state     {a['appStoreState']}")
+    print(f"release   {a.get('releaseType', '')}")
+    # The builds list is app-wide (there is no version→builds include); builds
+    # are few in practice, so show them all and mark the one matching --build
+    # expectations by number alone.
+    for b in flows.list_builds(client, args.app):
+        bi = b["attributes"]
+        print(f"build     {bi.get('version')} ({bi.get('processingState')})")
+    submission = client.get(f"/v1/appStoreVersions/{version['id']}/appStoreVersionSubmission")
+    if submission.get("data"):
+        print("submitted  yes")
+
+
+def cmd_create_version(client: Client, args) -> None:
+    v = flows.create_version(client, args.app, args.version, args.release, args.platform)
+    print(f"version {v['attributes']['versionString']} ready: {v['id']} ({v['attributes']['appStoreState']})")
+
+
+def cmd_whatsnew(client: Client, args) -> None:
+    version = flows.require_version(client, args.app, args.version)
+    text = read_text(args)
+    flows.set_localizations(client, version["id"], whats_new={args.locale: text})
+    print(f"What's New for {args.locale} updated")
+
+
+def cmd_description(client: Client, args) -> None:
+    version = flows.require_version(client, args.app, args.version)
+    text = read_text(args)
+    flows.set_localizations(client, version["id"], descriptions={args.locale: text})
+    print(f"description for {args.locale} updated")
+
+
+def cmd_review_notes(client: Client, args) -> None:
+    version = flows.require_version(client, args.app, args.version)
+    flows.set_review_notes(client, version["id"], read_text(args))
+    print("App Review notes updated")
+
+
+def cmd_screenshots(client: Client, args) -> None:
+    version = flows.require_version(client, args.app, args.version)
+    flows.set_screenshots(
+        client,
+        version["id"],
+        args.locale,
+        args.files,
+        display_type=args.display_type,
+        replace=args.replace,
+    )
+    print(f"{len(args.files)} screenshot(s) uploaded for {args.locale}")
+
+
+def cmd_attach_build(client: Client, args) -> None:
+    version = flows.require_version(client, args.app, args.version)
+    if args.wait:
+        flows.wait_for_build(client, args.app, args.build)
+    flows.attach_build(client, version["id"], args.app, args.build)
+    print(f"build {args.build} attached to {args.version}")
+
+
+def cmd_submit(client: Client, args) -> None:
+    version = flows.require_version(client, args.app, args.version)
+    if not args.yes and sys.stdin.isatty():
+        answer = input(f"Submit {args.version} for App Review? [y/N] ")
+        if answer.strip().lower() not in {"y", "yes"}:
+            raise SystemExit("aborted")
+    flows.submit_for_review(client, version["id"])
+    print(f"version {args.version} submitted for review")
+
+
+def cmd_cancel_submission(client: Client, args) -> None:
+    version = flows.require_version(client, args.app, args.version)
+    flows.cancel_submission(client, version["id"])
+    print("submission cancelled")
+
+
+def cmd_run(client: Client, args) -> None:
+    spec = load_spec(args.spec)
+    if args.dry_run:
+        print(f"plan for app {args.app}:")
+        for line in spec_plan(spec):
+            print(f"  - {line}")
+        return
+    run_spec(client, args.app, spec, submit_flag=args.submit, assume_yes=args.yes)
+
+
+def read_text(args) -> str:
+    if args.text is not None and args.file is not None:
+        raise SystemExit("--text and --file are mutually exclusive")
+    if args.text is not None:
+        return args.text
+    if args.file is not None:
+        return Path(args.file).read_text(encoding="utf-8")
+    raise SystemExit("provide --text or --file")
+
+
+# ---------------------------------------------------------------------------
+# parser assembly
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="asc-submit",
+        description="Ship an App Store version end to end via the App Store Connect API.",
+    )
+    parser.add_argument("--version", action="version", version=__import__("asc_submit").__version__)
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    def add(name: str, help_text: str) -> argparse.ArgumentParser:
+        p = sub.add_parser(name, help=help_text)
+        add_auth_arguments(p)
+        return p
+
+    def add_app_and_version(p: argparse.ArgumentParser) -> None:
+        p.add_argument("app", help="Apple ID of the app, or its bundle ID")
+        p.add_argument("--version", required=True, help="version string, e.g. 0.7.0")
+
+    p = add("versions", "list App Store versions and their states")
+    p.add_argument("app", help="Apple ID of the app, or its bundle ID")
+    p.set_defaults(func=cmd_versions)
+
+    p = add("status", "show one version's state, build and submission")
+    add_app_and_version(p)
+    p.set_defaults(func=cmd_status)
+
+    p = add("create-version", "create the version if it does not exist yet")
+    p.add_argument("app")
+    p.add_argument("--version", required=True)
+    p.add_argument("--release", default="AFTER_APPROVAL", help="AFTER_APPROVAL (default), MANUAL or SCHEDULED")
+    p.add_argument("--platform", default=flows.MACOS_PLATFORM, help="OS_X (default), IOS, TV_OS")
+    p.set_defaults(func=cmd_create_version)
+
+    p = add("whatsnew", "set the What's New text for one locale")
+    add_app_and_version(p)
+    p.add_argument("--locale", required=True, help="e.g. ja, en-US, zh-Hans, ko, es-ES")
+    p.add_argument("--text")
+    p.add_argument("--file")
+    p.set_defaults(func=cmd_whatsnew)
+
+    p = add("description", "set the description for one locale")
+    add_app_and_version(p)
+    p.add_argument("--locale", required=True)
+    p.add_argument("--text")
+    p.add_argument("--file")
+    p.set_defaults(func=cmd_description)
+
+    p = add("review-notes", "replace the App Review Information notes")
+    add_app_and_version(p)
+    p.add_argument("--text")
+    p.add_argument("--file")
+    p.set_defaults(func=cmd_review_notes)
+
+    p = add("screenshots", "upload screenshots for one locale (upload order = display order)")
+    add_app_and_version(p)
+    p.add_argument("--locale", required=True)
+    p.add_argument("--display-type", default="APP_DESKTOP", help="macOS default: APP_DESKTOP")
+    p.add_argument("--replace", action="store_true", help="delete the current set first")
+    p.add_argument("files", nargs="+", help="png/jpg paths, in display order")
+    p.set_defaults(func=cmd_screenshots)
+
+    p = add("attach-build", "attach an uploaded build to the version")
+    add_app_and_version(p)
+    p.add_argument("--build", required=True, help="build number, e.g. 7")
+    p.add_argument("--wait", action="store_true", help="wait for the build to reach VALID first")
+    p.add_argument("--wait-timeout", type=int, default=1800)
+    p.set_defaults(func=cmd_attach_build)
+
+    p = add("submit", "submit the version for App Review")
+    add_app_and_version(p)
+    p.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
+    p.set_defaults(func=cmd_submit)
+
+    p = add("cancel-submission", "remove the version from review")
+    add_app_and_version(p)
+    p.set_defaults(func=cmd_cancel_submission)
+
+    p = add("run", "run a whole shipping plan from a JSON spec")
+    p.add_argument("app", help="Apple ID of the app, or its bundle ID")
+    p.add_argument("--spec", required=True, help="path to the JSON spec (see examples/spec.example.json)")
+    p.add_argument("--submit", action="store_true", help="submit for review at the end")
+    p.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
+    p.add_argument("--dry-run", action="store_true", help="print the plan without touching anything")
+    p.set_defaults(func=cmd_run)
+
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    try:
+        client = build_client(args)
+        args.func(client, args)
+    except ApiError as err:
+        print(f"error: {err}", file=sys.stderr)
+        if err.forbidden:
+            print(Client.forbidden_hint(), file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        return 130
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
