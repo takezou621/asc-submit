@@ -25,6 +25,24 @@ def normalize_locale(locale: str) -> str:
     return LOCALE_ALIASES.get(locale, locale)
 
 
+# Client-side mirrors of App Store Connect's field limits, enforced so a bad
+# value fails here instead of at paste time. Apple's own docs disagree on the
+# keywords field (the version-information reference says 100 bytes, the
+# product-page guide says 100 characters); characters is the limit apps have
+# actually been accepted against with multi-byte CJK keywords, so that is what
+# we enforce — callers with non-ASCII keywords should still keep an eye on bytes.
+KEYWORDS_MAX_CHARS = 100
+SUBTITLE_MAX_CHARS = 30
+
+
+def _validate_localized_text(field: str, value: str, max_chars: int) -> str:
+    if "\n" in value or "\r" in value:
+        raise SystemExit(f"{field}: line breaks are not allowed (ASC renders the field as a single line)")
+    if len(value) > max_chars:
+        raise SystemExit(f"{field}: {len(value)} characters exceeds the {max_chars}-character limit")
+    return value
+
+
 # ---------------------------------------------------------------------------
 # lookup helpers
 
@@ -156,13 +174,13 @@ def attach_build(client: Client, version_id: str, app_id: str, build_string: str
 
 
 # ---------------------------------------------------------------------------
-# version-localized metadata (What's New + description)
+# version-localized metadata (What's New + description + keywords)
 
 
 def _localizations(client: Client, version_id: str) -> dict[str, dict]:
     found = client.get_all(
         f"/v1/appStoreVersions/{version_id}/appStoreVersionLocalizations",
-        {"fields[appStoreVersionLocalizations]": "locale,whatsNew,description"},
+        {"fields[appStoreVersionLocalizations]": "locale,whatsNew,description,keywords"},
     )
     return {loc["attributes"]["locale"]: loc for loc in found}
 
@@ -172,26 +190,33 @@ def set_localizations(
     version_id: str,
     whats_new: dict[str, str] | None = None,
     descriptions: dict[str, str] | None = None,
+    keywords: dict[str, str] | None = None,
 ) -> None:
-    """Set What's New and/or description text per locale (PATCH or POST)."""
+    """Set What's New, description and/or keywords text per locale (PATCH or POST)."""
     whats_new = {normalize_locale(k): v for k, v in (whats_new or {}).items()}
     descriptions = {normalize_locale(k): v for k, v in (descriptions or {}).items()}
-    if not whats_new and not descriptions:
+    keywords = {
+        normalize_locale(k): _validate_localized_text(f"keywords[{k}]", v, KEYWORDS_MAX_CHARS)
+        for k, v in (keywords or {}).items()
+    }
+    if not whats_new and not descriptions and not keywords:
         return
     existing = _localizations(client, version_id)
 
-    for locale in sorted(set(whats_new) | set(descriptions)):
+    for locale in sorted(set(whats_new) | set(descriptions) | set(keywords)):
         attrs = {}
         if locale in whats_new:
             attrs["whatsNew"] = whats_new[locale]
         if locale in descriptions:
             attrs["description"] = descriptions[locale]
+        if locale in keywords:
+            attrs["keywords"] = keywords[locale]
         if not attrs:
             continue
         if locale in existing:
             client.patch(
                 f"/v1/appStoreVersionLocalizations/{existing[locale]['id']}",
-                {"data": {"type": "appStoreVersionLocalizations", "id": existing[locale]["id"], "attributes": attrs}},
+                {"data": {"type": "appStoreVersionLocalizations", "id": existing[locale]['id'], "attributes": attrs}},
             )
         else:
             client.post(
@@ -203,6 +228,78 @@ def set_localizations(
                         "relationships": {
                             "appStoreVersion": {"data": {"type": "appStoreVersions", "id": version_id}}
                         },
+                    }
+                },
+            )
+
+
+# ---------------------------------------------------------------------------
+# app-level localized metadata (subtitle)
+
+
+# The app record keeps one appInfo per pipeline state (READY_FOR_SALE,
+# WAITING_FOR_REVIEW, PREPARE_FOR_SUBMISSION, …). Name and subtitle live on
+# the appInfoLocalizations of the record whose state is still editable — the
+# ones attached to live or in-review versions reject PATCHes. So unlike the
+# version-localized fields above, subtitles require a version to exist in an
+# editable state first.
+EDITABLE_APP_INFO_STATES = {
+    "PREPARE_FOR_SUBMISSION",
+    "REJECTED",
+    "DEVELOPER_REJECTED",
+    "METADATA_REJECTED",
+    "WAITING_FOR_EXPORT_COMPLIANCE",
+}
+
+
+def editable_app_info(client: Client, app_id: str) -> dict:
+    """Return the appInfo whose localizations can still be edited, if any."""
+    infos = client.get_all(f"/v1/apps/{app_id}/appInfos")
+    for info in infos:
+        if info["attributes"].get("state") in EDITABLE_APP_INFO_STATES:
+            return info
+    states = ", ".join(sorted({i["attributes"].get("state", "?") for i in infos})) or "none"
+    raise SystemExit(
+        f"App {app_id} has no appInfo in an editable state ({states}). "
+        "Name/subtitle travel with a version: create the next version "
+        "(asc-submit create-version) before setting a subtitle."
+    )
+
+
+def _app_info_localizations(client: Client, app_info_id: str) -> dict[str, dict]:
+    found = client.get_all(
+        f"/v1/appInfos/{app_info_id}/appInfoLocalizations",
+        {"fields[appInfoLocalizations]": "locale,name,subtitle"},
+    )
+    return {loc["attributes"]["locale"]: loc for loc in found}
+
+
+def set_subtitles(client: Client, app_id: str, subtitles: dict[str, str]) -> None:
+    """Set the app subtitle per locale (PATCH or POST on the editable appInfo)."""
+    subtitles = {
+        normalize_locale(k): _validate_localized_text(f"subtitle[{k}]", v, SUBTITLE_MAX_CHARS)
+        for k, v in (subtitles or {}).items()
+    }
+    if not subtitles:
+        return
+    info = editable_app_info(client, app_id)
+    existing = _app_info_localizations(client, info["id"])
+
+    for locale in sorted(subtitles):
+        attrs = {"subtitle": subtitles[locale]}
+        if locale in existing:
+            client.patch(
+                f"/v1/appInfoLocalizations/{existing[locale]['id']}",
+                {"data": {"type": "appInfoLocalizations", "id": existing[locale]["id"], "attributes": attrs}},
+            )
+        else:
+            client.post(
+                f"/v1/appInfos/{info['id']}/appInfoLocalizations",
+                {
+                    "data": {
+                        "type": "appInfoLocalizations",
+                        "attributes": {"locale": locale, **attrs},
+                        "relationships": {"appInfo": {"data": {"type": "appInfos", "id": info["id"]}}},
                     }
                 },
             )

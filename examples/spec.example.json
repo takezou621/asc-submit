@@ -11,6 +11,14 @@
     "ja": "アプリの説明 (ja)。ASC は改行をそのまま表示します。",
     "en-US": "The app description (en-US). Line breaks are shown as-is."
   },
+  "keywords": {
+    "ja": "録音,録画,文字起こし",
+    "en-US": "recorder,transcription,meeting"
+  },
+  "subtitles": {
+    "ja": "録って文字起こしするレコーダー",
+    "en-US": "Record & transcribe meetings"
+  },
   "reviewNotes": "How to test this build for review: …",
   "screenshotDisplayType": "APP_DESKTOP",
   "screenshotsReplace": true,

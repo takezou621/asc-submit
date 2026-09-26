@@ -71,6 +71,10 @@ def spec_plan(spec: dict) -> list[str]:
         plan.append(f"set What's New for: {', '.join(sorted(spec['whatsNew']))}")
     if spec.get("descriptions"):
         plan.append(f"set descriptions for: {', '.join(sorted(spec['descriptions']))}")
+    if spec.get("keywords"):
+        plan.append(f"set keywords for: {', '.join(sorted(spec['keywords']))}")
+    if spec.get("subtitles"):
+        plan.append(f"set subtitles for: {', '.join(sorted(spec['subtitles']))} (app-level)")
     if spec.get("reviewNotes"):
         plan.append("update App Review notes")
     for locale, files in sorted((spec.get("screenshots") or {}).items()):
@@ -97,9 +101,16 @@ def run_spec(client: Client, app_id: str, spec: dict, submit_flag: bool, assume_
         flows.attach_build(client, version_id, app_id, build)
         print(f"build {build} attached")
 
-    flows.set_localizations(client, version_id, spec.get("whatsNew"), spec.get("descriptions"))
-    if spec.get("whatsNew") or spec.get("descriptions"):
+    flows.set_localizations(client, version_id, spec.get("whatsNew"), spec.get("descriptions"), spec.get("keywords"))
+    if spec.get("whatsNew") or spec.get("descriptions") or spec.get("keywords"):
         print("localizations updated")
+
+    # Subtitles are app-level and need the just-created version's appInfo in an
+    # editable state — which create_version above just ensured — so this comes
+    # after it, not before.
+    if spec.get("subtitles"):
+        flows.set_subtitles(client, app_id, spec["subtitles"])
+        print("subtitles updated")
 
     if spec.get("reviewNotes"):
         flows.set_review_notes(client, version_id, spec["reviewNotes"])
@@ -176,6 +187,19 @@ def cmd_description(client: Client, args) -> None:
     text = read_text(args)
     flows.set_localizations(client, version["id"], descriptions={args.locale: text})
     print(f"description for {args.locale} updated")
+
+
+def cmd_keywords(client: Client, args) -> None:
+    version = flows.require_version(client, args.app, args.version)
+    text = read_text(args)
+    flows.set_localizations(client, version["id"], keywords={args.locale: text})
+    print(f"keywords for {args.locale} updated")
+
+
+def cmd_subtitle(client: Client, args) -> None:
+    text = read_text(args)
+    flows.set_subtitles(client, args.app, {args.locale: text})
+    print(f"subtitle for {args.locale} updated")
 
 
 def cmd_review_notes(client: Client, args) -> None:
@@ -259,7 +283,24 @@ def cmd_doctor(client: Client, args) -> None:
         else:
             checks.append(("write: version metadata", True, f"HTTP {err.status} (not a permission error)"))
 
-    # 3. Submission uses POST /v1/appStoreVersionSubmissions, gated by the same
+    # 3. Write probe for app-level metadata (name/subtitle live on
+    #    appInfoLocalizations, a separate resource from version localizations).
+    probe_localization = "00000000-0000-0000-0000-000000000001"
+    try:
+        client.patch(
+            f"/v1/appInfoLocalizations/{probe_localization}",
+            {"data": {"type": "appInfoLocalizations", "id": probe_localization, "attributes": {}}},
+        )
+        checks.append(("write: app-level metadata (subtitle)", True, "unexpectedly patched a nonexistent id"))
+    except ApiError as err:
+        if err.status == 403:
+            checks.append(("write: app-level metadata (subtitle)", False, "HTTP 403 — key role cannot edit app info"))
+        elif err.status == 404:
+            checks.append(("write: app-level metadata (subtitle)", True, "HTTP 404 on a probe id (resource absent, permission granted)"))
+        else:
+            checks.append(("write: app-level metadata (subtitle)", True, f"HTTP {err.status} (not a permission error)"))
+
+    # 4. Submission uses POST /v1/appStoreVersionSubmissions, gated by the same
     #    role as metadata writes — there is no safer separate probe (a real
     #    POST would submit), so mirror the metadata verdict.
     write_ok = checks[1][1]
@@ -410,6 +451,23 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--text")
     p.add_argument("--file")
     p.set_defaults(func=cmd_description)
+
+    p = add("keywords", "set the keywords for one locale (comma-separated, single line)")
+    add_app_and_version(p)
+    p.add_argument("--locale", required=True)
+    p.add_argument("--text")
+    p.add_argument("--file")
+    p.set_defaults(func=cmd_keywords)
+
+    p = add(
+        "subtitle",
+        "set the app subtitle for one locale (app-level: needs a version in an editable state)",
+    )
+    p.add_argument("app", help="Apple ID of the app, or its bundle ID")
+    p.add_argument("--locale", required=True)
+    p.add_argument("--text")
+    p.add_argument("--file")
+    p.set_defaults(func=cmd_subtitle)
 
     p = add("review-notes", "replace the App Review Information notes")
     add_app_and_version(p)

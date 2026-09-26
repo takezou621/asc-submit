@@ -105,6 +105,14 @@ Write the release plan once (this file can live in your app's repository):
     "ja": "アプリの説明です。",
     "en-US": "The app description."
   },
+  "keywords": {
+    "ja": "録音,録画,文字起こし",
+    "en-US": "recorder,transcription,meeting"
+  },
+  "subtitles": {
+    "ja": "録って文字起こしするレコーダー",
+    "en-US": "Record & transcribe meetings"
+  },
   "reviewNotes": "How to test this build for review: …",
   "screenshotsReplace": true,
   "screenshots": {
@@ -123,9 +131,26 @@ asc-submit run 6812783176 --spec release-0.7.0.json --submit --yes
 ```
 
 `run` will: create the version if missing → wait for build `8` to reach VALID →
-attach it → update every localization → replace screenshots → submit for review.
+attach it → update every localization (What's New, description, keywords) →
+set subtitles → replace screenshots → submit for review.
 Drop `--submit` to do everything but the submission (e.g. let a human press the
 final button).
+
+### Keywords and subtitles
+
+- **Keywords** travel with a version (`appStoreVersionLocalizations`), like
+  What's New and descriptions. The field is validated client-side against the
+  100-character limit on a single line. Apple's own docs are inconsistent about
+  the unit (the version-information reference says 100 *bytes*, the product-page
+  guide says 100 *characters*); characters is the limit that multi-byte CJK
+  keywords have actually been accepted against, so that is what this tool
+  enforces — if your keywords are non-ASCII, keep an eye on the byte count too.
+- **Subtitles are app-level, not per version** (`appInfoLocalizations`). The app
+  keeps one appInfo per pipeline state, and only the one in an editable state
+  (`PREPARE_FOR_SUBMISSION`, `REJECTED`, …) accepts writes — which is why `run`
+  applies subtitles *after* creating the version. Calling the `subtitle`
+  subcommand while every version is live or in review fails with a hint to
+  create the next version first. 30-character limit, validated client-side.
 
 ## Individual commands
 
@@ -135,6 +160,8 @@ asc-submit status 6812783176 --version 0.7.0        # state, build, submission
 asc-submit create-version 6812783176 --version 0.7.0
 asc-submit whatsnew 6812783176 --version 0.7.0 --locale ja --file whatsnew-ja.txt
 asc-submit description 6812783176 --version 0.7.0 --locale en-US --text "…"
+asc-submit keywords 6812783176 --version 0.7.0 --locale ja --text "録音,録画"
+asc-submit subtitle 6812783176 --locale ja --text "録って文字起こしするレコーダー"
 asc-submit review-notes 6812783176 --version 0.7.0 --file notes.md
 asc-submit screenshots 6812783176 --version 0.7.0 --locale ja --replace shot-01.png shot-02.png
 asc-submit attach-build 6812783176 --version 0.7.0 --build 8 --wait
@@ -159,8 +186,8 @@ App Manager key at *Users and Access → Integrations* and update
 
 ## Limitations (v1)
 
-- App-level metadata (privacy labels, pricing, availability) is out of scope —
-  those change rarely and are safer to manage in the web UI.
+- App-level metadata beyond the subtitle (privacy labels, pricing, availability)
+  is out of scope — those change rarely and are safer to manage in the web UI.
 - Screenshot upload order follows invocation order; drag-to-reorder parity in the
   media manager is not implemented.
 - App previews (videos) are not managed.
