@@ -1,0 +1,20 @@
+asc_submit/__init__.py
+  h_864205080385bc 3
+asc_submit/cli.py
+  h_864205080385bc 248,251-252,257,545-549
+pyproject.toml
+  h_864205080385bc 7
+tests/test_cli.py
+  h_864205080385bc 1,53-69
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "368f73527189f357e51d198af49e4ec4930a5eec",
+  "prompts": {},
+  "humans": {
+    "h_864205080385bc": {
+      "author": "takezou621 <takezou621@gmail.com>"
+    }
+  }
+}
