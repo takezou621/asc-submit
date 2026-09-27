@@ -168,8 +168,12 @@ def attach_build(client: Client, version_id: str, app_id: str, build_string: str
             f"Build {build_string} is not uploaded to App Store Connect for app {app_id}. "
             "Upload it first (xcodebuild -exportArchive destination=upload, altool or Transporter)."
         )
+    # appStoreVersion's build relationship is **to-one** ("build", not "builds") —
+    # PATCHing "builds" answers 404 "The relationship 'builds' does not exist"
+    # (found live the first time this path ran; kilde's MAS workflow, run
+    # 36282102696).
     client.patch(
-        f"/v1/appStoreVersions/{version_id}/relationships/builds",
+        f"/v1/appStoreVersions/{version_id}/relationships/build",
         {"data": {"type": "builds", "id": build["id"]}},
     )
     return build
