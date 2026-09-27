@@ -22,6 +22,9 @@ class FakeClient(mock.Mock):
         self.get_all = mock.Mock(side_effect=self._get_all)
         self.patch = mock.Mock(side_effect=self._patch)
         self.post = mock.Mock(side_effect=self._post)
+        # 明示が必要: 自動生成の子モックは FakeClient の __init__ を parent= 付きで
+        # 呼ぼうとして TypeError になる (Python 3.14 実測)
+        self.delete = mock.Mock()
 
     def _get_all(self, path, query=None):
         if path.startswith("/v1/appStoreVersions/") and path.endswith("/appStoreVersionLocalizations"):
@@ -159,7 +162,7 @@ class CancelSubmissionTests(unittest.TestCase):
             return_value={"data": [{"id": "SUB9", "attributes": {"state": "WAITING_FOR_REVIEW"}}]}
         )
         flows.cancel_submission(client, "V")
-        path, _ = client.delete.call_args[0] if client.delete.called else ("", None)
+        (path,) = client.delete.call_args[0]
         self.assertEqual(path, "/v1/reviewSubmissions/SUB9")
 
     def test_legacy_fallback_when_no_review_submission(self):
@@ -171,7 +174,7 @@ class CancelSubmissionTests(unittest.TestCase):
         )
         flows.cancel_submission(client, "V")
         self.assertTrue(client.delete.called)
-        path, _ = client.delete.call_args[0]
+        (path,) = client.delete.call_args[0]
         self.assertEqual(path, "/v1/appStoreVersionSubmissions/LEGACY")
 
 
