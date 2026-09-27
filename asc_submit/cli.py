@@ -134,7 +134,7 @@ def run_spec(client: Client, app_id: str, spec: dict, submit_flag: bool, assume_
             if answer.strip().lower() not in {"y", "yes"}:
                 print("aborted — everything except the submission is done")
                 return
-        flows.submit_for_review(client, version_id)
+        flows.submit_for_review(client, app_id, version_id)
         print(f"version {version_string} submitted for review")
 
 
@@ -251,7 +251,8 @@ def cmd_submit(client: Client, args) -> None:
         answer = input(f"Submit {args.version} for App Review? [y/N] ")
         if answer.strip().lower() not in {"y", "yes"}:
             raise SystemExit("aborted")
-    flows.submit_for_review(client, version["id"])
+    app_id = flows.find_app(client, args.app)["id"]
+    flows.submit_for_review(client, app_id, version["id"])
     print(f"version {args.version} submitted for review")
 
 

@@ -127,30 +127,39 @@ class SubmitForReviewTests(unittest.TestCase):
         client.get = mock.Mock(return_value={"data": existing or []})
         return client
 
-    def test_creates_and_patches_submitted_true(self):
+    def test_creates_links_and_patches_submitted_true(self):
         client = self._client()
-        client.post = mock.Mock(
-            side_effect=lambda path, body: (
-                {"data": {"id": "SUB1", "attributes": {"state": "READY_FOR_REVIEW"}}}
-                if path == "/v1/reviewSubmissions"
-                else mock.DEFAULT
-            )
-        )
-        flows.submit_for_review(client, "V")
-        path, body = client.post.call_args[0]
-        self.assertEqual(path, "/v1/reviewSubmissions")
-        self.assertEqual(body["data"]["attributes"], {"platform": "MAC_OS"})
-        self.assertEqual(
-            body["data"]["relationships"]["appStoreVersionForReview"]["data"]["id"], "V"
-        )
+        posts = []
+
+        def fake_post(path, body):
+            posts.append((path, body))
+            if path == "/v1/reviewSubmissions":
+                return {"data": {"id": "SUB1", "attributes": {"state": "DRAFT"}}}
+            return {"data": {"id": "ITEM1"}}
+
+        client.post = mock.Mock(side_effect=fake_post)
+        flows.submit_for_review(client, "APP", "V")
+        # 1) create with the app relationship, WITHOUT the version
+        self.assertEqual(posts[0][0], "/v1/reviewSubmissions")
+        self.assertEqual(posts[0][1]["data"]["attributes"], {"platform": "MAC_OS"})
+        self.assertEqual(posts[0][1]["data"]["relationships"]["app"]["data"]["id"], "APP")
+        self.assertNotIn("appStoreVersionForReview", posts[0][1]["data"]["relationships"])
+        # 2) link the version via reviewSubmissionItems
+        self.assertEqual(posts[1][0], "/v1/reviewSubmissionItems")
+        rel = posts[1][1]["data"]["relationships"]
+        self.assertEqual(rel["reviewSubmission"]["data"]["id"], "SUB1")
+        self.assertEqual(rel["appStoreVersion"]["data"]["id"], "V")
+        # 3) submit
         path, body = client.patch.call_args[0]
         self.assertEqual(path, "/v1/reviewSubmissions/SUB1")
         self.assertEqual(body["data"]["attributes"], {"submitted": True})
 
     def test_existing_submission_is_reused(self):
         client = self._client(existing=[{"id": "SUB9", "attributes": {"state": "READY_FOR_REVIEW"}}])
-        flows.submit_for_review(client, "V")
-        client.post.assert_not_called()
+        client.post = mock.Mock(return_value={"data": {"id": "ITEM1"}})
+        flows.submit_for_review(client, "APP", "V")
+        create_calls = [c for c in client.post.call_args_list if c[0][0] == "/v1/reviewSubmissions"]
+        self.assertEqual(create_calls, [])
         path, _ = client.patch.call_args[0]
         self.assertEqual(path, "/v1/reviewSubmissions/SUB9")
 
