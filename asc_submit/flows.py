@@ -468,32 +468,85 @@ def set_screenshots(
 # submission
 
 
-def submit_for_review(client: Client, version_id: str) -> None:
+def _open_review_submission(client: Client, version_id: str) -> dict | None:
+    """Return the version's reviewSubmission resource, if one exists."""
     try:
-        client.post(
-            "/v1/appStoreVersionSubmissions",
+        doc = client.get(f"/v1/appStoreVersions/{version_id}/reviewSubmissions")
+    except ApiError as err:
+        if err.status == 404:
+            return None
+        raise
+    subs = doc.get("data") or []
+    return subs[0] if subs else None
+
+
+def submit_for_review(client: Client, version_id: str, platform: str = MACOS_PLATFORM) -> None:
+    """Submit the version for App Review via the reviewSubmissions API.
+
+    The legacy POST /v1/appStoreVersionSubmissions is deprecated: it answers
+    403 "The resource 'appStoreVersionSubmissions' does not allow 'CREATE'.
+    Allowed operation is: DELETE" (found live on kilde's 0.8.1 submission,
+    run 36284583404). The reviewSubmissions flow is create → link the version
+    (at creation, via appStoreVersionForReview) → PATCH submitted: true.
+    """
+    sub = _open_review_submission(client, version_id)
+    if sub is None:
+        try:
+            sub = client.post(
+                "/v1/reviewSubmissions",
+                {
+                    "data": {
+                        "type": "reviewSubmissions",
+                        "attributes": {"platform": platform},
+                        "relationships": {
+                            "appStoreVersionForReview": {
+                                "data": {"type": "appStoreVersions", "id": version_id}
+                            }
+                        },
+                    }
+                },
+            )["data"]
+        except ApiError as err:
+            if err.status in {409, 422}:
+                # A submission may already exist (e.g. retried after a timeout).
+                sub = _open_review_submission(client, version_id)
+                if sub is None:
+                    raise
+            else:
+                raise
+
+    try:
+        client.patch(
+            f"/v1/reviewSubmissions/{sub['id']}",
             {
                 "data": {
-                    "type": "appStoreVersionSubmissions",
-                    "relationships": {
-                        "appStoreVersion": {"data": {"type": "appStoreVersions", "id": version_id}}
-                    },
+                    "type": "reviewSubmissions",
+                    "id": sub["id"],
+                    "attributes": {"submitted": True},
                 }
             },
         )
     except ApiError as err:
         if err.status in {409, 422}:
-            # A submission may already exist (e.g. retried after a timeout).
-            existing = client.get(f"/v1/appStoreVersions/{version_id}/appStoreVersionSubmission")
-            if existing.get("data"):
-                print("Version already has a pending submission; nothing to do.", file=sys.stderr)
-                return
+            print("Version already has a pending submission; nothing to do.", file=sys.stderr)
+            return
         raise
 
 
 def cancel_submission(client: Client, version_id: str) -> None:
-    doc = client.get(f"/v1/appStoreVersions/{version_id}/appStoreVersionSubmission")
-    submission = doc.get("data")
-    if not submission:
-        raise SystemExit("This version has no pending submission to cancel")
-    client.delete(f"/v1/appStoreVersionSubmissions/{submission['id']}")
+    sub = _open_review_submission(client, version_id)
+    if sub is None:
+        # Fall back to the legacy submission resource (only cancel — DELETE —
+        # still works there for versions submitted before the deprecation).
+        try:
+            doc = client.get(f"/v1/appStoreVersions/{version_id}/appStoreVersionSubmission")
+        except ApiError as err:
+            if err.status == 404:
+                raise SystemExit("This version has no pending submission to cancel")
+            raise
+        submission = doc.get("data")
+        if not submission:
+            raise SystemExit("This version has no pending submission to cancel")
+        client.delete(f"/v1/appStoreVersionSubmissions/{submission['id']}")
+        return
+    client.delete(f"/v1/reviewSubmissions/{sub['id']}")

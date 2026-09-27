@@ -114,6 +114,67 @@ class AttachBuildTests(unittest.TestCase):
         self.assertEqual(body["data"], {"type": "builds", "id": "B8"})
 
 
+class SubmitForReviewTests(unittest.TestCase):
+    """The reviewSubmissions flow (the legacy appStoreVersionSubmissions POST
+    is deprecated: 403 "Allowed operation is: DELETE" — kilde run 36284583404)."""
+
+    def _client(self, existing=None):
+        client = FakeClient()
+        # GET reviewSubmissions for the version → existing (or 404-equivalent [])
+        client.get = mock.Mock(return_value={"data": existing or []})
+        return client
+
+    def test_creates_and_patches_submitted_true(self):
+        client = self._client()
+        client.post = mock.Mock(
+            side_effect=lambda path, body: (
+                {"data": {"id": "SUB1", "attributes": {"state": "READY_FOR_REVIEW"}}}
+                if path == "/v1/reviewSubmissions"
+                else mock.DEFAULT
+            )
+        )
+        flows.submit_for_review(client, "V")
+        path, body = client.post.call_args[0]
+        self.assertEqual(path, "/v1/reviewSubmissions")
+        self.assertEqual(body["data"]["attributes"], {"platform": "MAC_OS"})
+        self.assertEqual(
+            body["data"]["relationships"]["appStoreVersionForReview"]["data"]["id"], "V"
+        )
+        path, body = client.patch.call_args[0]
+        self.assertEqual(path, "/v1/reviewSubmissions/SUB1")
+        self.assertEqual(body["data"]["attributes"], {"submitted": True})
+
+    def test_existing_submission_is_reused(self):
+        client = self._client(existing=[{"id": "SUB9", "attributes": {"state": "READY_FOR_REVIEW"}}])
+        flows.submit_for_review(client, "V")
+        client.post.assert_not_called()
+        path, _ = client.patch.call_args[0]
+        self.assertEqual(path, "/v1/reviewSubmissions/SUB9")
+
+
+class CancelSubmissionTests(unittest.TestCase):
+    def test_cancels_via_review_submissions_when_present(self):
+        client = FakeClient()
+        client.get = mock.Mock(
+            return_value={"data": [{"id": "SUB9", "attributes": {"state": "WAITING_FOR_REVIEW"}}]}
+        )
+        flows.cancel_submission(client, "V")
+        path, _ = client.delete.call_args[0] if client.delete.called else ("", None)
+        self.assertEqual(path, "/v1/reviewSubmissions/SUB9")
+
+    def test_legacy_fallback_when_no_review_submission(self):
+        client = FakeClient()
+        client.get = mock.Mock(
+            side_effect=lambda path, query=None: (
+                {"data": {"id": "LEGACY"}} if "appStoreVersionSubmission" in path else {"data": []}
+            )
+        )
+        flows.cancel_submission(client, "V")
+        self.assertTrue(client.delete.called)
+        path, _ = client.delete.call_args[0]
+        self.assertEqual(path, "/v1/appStoreVersionSubmissions/LEGACY")
+
+
 class SetSubtitlesTests(unittest.TestCase):
     def _client(self, state="PREPARE_FOR_SUBMISSION"):
         return FakeClient(

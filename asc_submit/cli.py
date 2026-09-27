@@ -165,9 +165,25 @@ def cmd_status(client: Client, args) -> None:
     for b in flows.list_builds(client, args.app):
         bi = b["attributes"]
         print(f"build     {bi.get('version')} ({bi.get('processingState')})")
-    submission = client.get(f"/v1/appStoreVersions/{version['id']}/appStoreVersionSubmission")
-    if submission.get("data"):
-        print("submitted  yes")
+    # Submission state: the legacy appStoreVersionSubmission endpoint answers
+    # 404 when nothing is attached, and the modern reviewSubmissions flow is
+    # what submit_for_review actually creates — check both.
+    submitted = False
+    try:
+        submission = client.get(f"/v1/appStoreVersions/{version['id']}/appStoreVersionSubmission")
+        if submission.get("data"):
+            submitted = True
+    except ApiError as err:
+        if err.status != 404:
+            raise
+    if not submitted:
+        sub = flows._open_review_submission(client, version["id"])
+        if sub is not None:
+            state = sub.get("attributes", {}).get("state", "?")
+            print(f"submitted  yes (reviewSubmission: {state})")
+            submitted = True
+    if not submitted:
+        print("submitted  no")
 
 
 def cmd_create_version(client: Client, args) -> None:
@@ -303,12 +319,12 @@ def cmd_doctor(client: Client, args) -> None:
         else:
             checks.append(("write: app-level metadata (subtitle)", True, f"HTTP {err.status} (not a permission error)"))
 
-    # 4. Submission uses POST /v1/appStoreVersionSubmissions, gated by the same
-    #    role as metadata writes — there is no safer separate probe (a real
-    #    POST would submit), so mirror the metadata verdict.
+    # 4. Submission uses the reviewSubmissions flow, gated by the same role as
+    #    metadata writes — there is no safer separate probe (a real POST would
+    #    submit), so mirror the metadata verdict.
     write_ok = checks[1][1]
     checks.append(
-        ("submit-capable (same role gate as metadata writes)", write_ok, "POST appStoreVersionSubmissions is probed live at submit time")
+        ("submit-capable (same role gate as metadata writes)", write_ok, "reviewSubmissions is probed live at submit time")
     )
 
     print(f"asc-submit doctor for app {args.app}")
