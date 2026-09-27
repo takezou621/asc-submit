@@ -480,14 +480,17 @@ def _open_review_submission(client: Client, version_id: str) -> dict | None:
     return subs[0] if subs else None
 
 
-def submit_for_review(client: Client, version_id: str, platform: str = MACOS_PLATFORM) -> None:
+def submit_for_review(client: Client, app_id: str, version_id: str, platform: str = MACOS_PLATFORM) -> None:
     """Submit the version for App Review via the reviewSubmissions API.
 
     The legacy POST /v1/appStoreVersionSubmissions is deprecated: it answers
     403 "The resource 'appStoreVersionSubmissions' does not allow 'CREATE'.
     Allowed operation is: DELETE" (found live on kilde's 0.8.1 submission,
-    run 36284583404). The reviewSubmissions flow is create → link the version
-    (at creation, via appStoreVersionForReview) → PATCH submitted: true.
+    run 36284583404). The reviewSubmissions flow is:
+    create (with **app**, not the version — passing appStoreVersionForReview
+    in CREATE answers 409 "can not be included in a 'CREATE' operation",
+    run 36285373437) → link the version via reviewSubmissionItems →
+    PATCH submitted: true.
     """
     sub = _open_review_submission(client, version_id)
     if sub is None:
@@ -499,9 +502,7 @@ def submit_for_review(client: Client, version_id: str, platform: str = MACOS_PLA
                         "type": "reviewSubmissions",
                         "attributes": {"platform": platform},
                         "relationships": {
-                            "appStoreVersionForReview": {
-                                "data": {"type": "appStoreVersions", "id": version_id}
-                            }
+                            "app": {"data": {"type": "apps", "id": app_id}}
                         },
                     }
                 },
@@ -514,6 +515,30 @@ def submit_for_review(client: Client, version_id: str, platform: str = MACOS_PLA
                     raise
             else:
                 raise
+
+    # Attach the version as the item under review. A 409 here means the item
+    # already exists (retry after a partial failure) — that is fine, the
+    # submission PATCH below is what matters.
+    try:
+        client.post(
+            "/v1/reviewSubmissionItems",
+            {
+                "data": {
+                    "type": "reviewSubmissionItems",
+                    "relationships": {
+                        "reviewSubmission": {
+                            "data": {"type": "reviewSubmissions", "id": sub["id"]}
+                        },
+                        "appStoreVersion": {
+                            "data": {"type": "appStoreVersions", "id": version_id}
+                        },
+                    },
+                }
+            },
+        )
+    except ApiError as err:
+        if err.status not in {409, 422}:
+            raise
 
     try:
         client.patch(
