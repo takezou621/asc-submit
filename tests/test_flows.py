@@ -92,6 +92,28 @@ class CreateVersionPlatformTests(unittest.TestCase):
         self.assertEqual(body["data"]["attributes"]["platform"], "MAC_OS")
 
 
+class AttachBuildTests(unittest.TestCase):
+    def _client(self):
+        client = FakeClient()
+        # find_build lists app-wide builds through get_all("/v1/apps/APP/builds")
+        client.get_all = mock.Mock(
+            side_effect=lambda path, query=None: (
+                [{"id": "B8", "attributes": {"version": "8", "processingState": "VALID"}}]
+                if path == "/v1/apps/APP/builds"
+                else []
+            )
+        )
+        return client
+
+    def test_patches_the_singular_build_relationship(self):
+        # appStoreVersion.build is to-one; "builds" answers 404 (found live).
+        client = self._client()
+        flows.attach_build(client, "V", "APP", "8")
+        path, body = client.patched[0]
+        self.assertEqual(path, "/v1/appStoreVersions/V/relationships/build")
+        self.assertEqual(body["data"], {"type": "builds", "id": "B8"})
+
+
 class SetSubtitlesTests(unittest.TestCase):
     def _client(self, state="PREPARE_FOR_SUBMISSION"):
         return FakeClient(
