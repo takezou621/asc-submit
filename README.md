@@ -96,6 +96,7 @@ Write the release plan once (this file can live in your app's repository):
 {
   "version": "0.7.0",
   "releaseType": "AFTER_APPROVAL",
+  "phasedRelease": true,
   "build": "8",
   "whatsNew": {
     "ja": "安定性と信頼性を改善しました。",
@@ -105,6 +106,10 @@ Write the release plan once (this file can live in your app's repository):
     "ja": "アプリの説明です。",
     "en-US": "The app description."
   },
+  "promotionalText": {
+    "ja": "新機能の告知テキスト（170字まで）",
+    "en-US": "Announce what's new (up to 170 chars)"
+  },
   "keywords": {
     "ja": "録音,録画,文字起こし",
     "en-US": "recorder,transcription,meeting"
@@ -112,6 +117,10 @@ Write the release plan once (this file can live in your app's repository):
   "subtitles": {
     "ja": "録って文字起こしするレコーダー",
     "en-US": "Record & transcribe meetings"
+  },
+  "supportUrls": {
+    "ja": "https://kilde.app/ja/support",
+    "en-US": "https://kilde.app/support"
   },
   "reviewNotes": "How to test this build for review: …",
   "screenshotsReplace": true,
@@ -122,6 +131,11 @@ Write the release plan once (this file can live in your app's repository):
   "submit": true
 }
 ```
+
+The spec also accepts `releaseDate` (ISO 8601 with a UTC offset — implies
+`releaseType: SCHEDULED`), `marketingUrls`, `privacyUrls` and `appNames`
+(app-level, like subtitles), and `copyright`. Everything is optional; `run`
+applies only what the spec sets.
 
 Preview the plan, then execute:
 
@@ -136,12 +150,65 @@ set subtitles → replace screenshots → submit for review.
 Drop `--submit` to do everything but the submission (e.g. let a human press the
 final button).
 
+### Linting the spec before it ships
+
+`run` lints the spec before touching anything — and `validate` runs the same
+check standalone, no API key, nothing leaves the machine:
+
+```sh
+asc-submit validate --spec release-0.7.0.json
+```
+
+It stops the line for the mistakes that otherwise ship silently: placeholder
+copy (`TODO`, `Lorem ipsum`, `<app name>`), a mistyped key (`"whatsnew"` would
+skip the release notes entirely), field-limit violations (keywords over 100
+characters, subtitles over 30), and screenshots that no longer exist at the
+given paths. Keyword quality audits (duplicates, spaces after commas, the
+100-byte CJK limit) come back as warnings, as does `submit` without a `build`.
+Keys starting with `_` are a comment convention and ignored.
+
+## Waiting for the review outcome
+
+Submissions used to end at `submit` — the release loop now closes with `wait`:
+
+```sh
+asc-submit wait 6812783176 --version 0.7.0
+```
+
+It polls the version's App Store state (every 5 minutes by default,
+`--interval` to change; `--timeout` caps the watch at 5 days by default, `0`
+waits forever) and exits the moment review resolves:
+
+- **exit 0** — approved: `READY_FOR_SALE` (live on the store) or
+  `PENDING_DEVELOPER_RELEASE` (approved, `releaseType MANUAL` — the release
+  itself now waits for you in App Store Connect)
+- **exit 1** — rejected / metadata rejected / withdrawn, with where to read
+  the rejection notes, or the watch timed out (re-run to keep waiting)
+
+A version still in `PREPARE_FOR_SUBMISSION` fails immediately with a hint to
+submit it first, and `WAITING_FOR_EXPORT_COMPLIANCE` is called out — review
+does not progress until the compliance question is answered.
+
+`wait` records a run in the journal like `run` and `upload` do, so the live
+state transitions are watchable from `asc-submit serve` or
+`asc-submit logs <id> --follow` for the whole (possibly day-long) review.
+
+For CI or a self-hosted watcher, one notification covers the outcome:
+
+```sh
+export ASC_WEBHOOK_URL=https://hooks.slack.com/services/…   # or pass --webhook
+```
+
+On resolution `wait` POSTs one Slack-style `{"text": …}` message; a failed
+notification only logs a warning, it never masks the outcome.
+
 ## Watching a run in real time
 
-`run` and `upload` record every step as they execute — status, timing and log
-text — under `.asc-submit/runs/<run-id>/` (`state.json` + `output.log`; move it
-with `--runs-dir` or `$ASC_SUBMIT_RUNS_DIR`). The files are the interface:
-there is no daemon and no database, and every viewer reads the same data.
+`run`, `upload` and `wait` record every step as they execute — status, timing
+and log text — under `.asc-submit/runs/<run-id>/` (`state.json` + `output.log`;
+move it with `--runs-dir` or `$ASC_SUBMIT_RUNS_DIR`). The files are the
+interface: there is no daemon and no database, and every viewer reads the same
+data.
 
 Browser dashboard, GitHub-Actions style (steps, durations, live logs):
 
@@ -171,9 +238,40 @@ Run states mirror what happened: `success`, `failed` (the red box shows the
 error, and the failing step carries it too), `cancelled` — Ctrl-C, or a submit
 confirmation answered no (everything except the submission itself did ship).
 
-Each `run` / `upload` prints its run id at startup — that id is what you pass
+Each `run` / `upload` / `wait` prints its run id at startup — that id is what you pass
 to the commands above (and what `serve`'s URL looks like:
 `http://127.0.0.1:8756/runs/<id>`).
+
+### Release controls
+
+Three knobs decide *how* the version goes out, all settable from the spec or
+as commands:
+
+- **Phased release** — the 7-day curve where the update reaches 1%, 2%, 5%…
+  100% of automatic-update users:
+
+  ```sh
+  asc-submit phased-release 6812783176 --version 0.7.0        # show state
+  asc-submit phased-release 6812783176 --version 0.7.0 --on   # enable
+  ```
+
+  Spec key: `"phasedRelease": true/false`. It only takes effect when the
+  version releases automatically (`releaseType: AFTER_APPROVAL`, the default)
+  — `validate` warns when the combination can't work.
+
+- **Scheduled release** — a fixed date and time (implies
+  `releaseType: SCHEDULED`):
+
+  ```sh
+  asc-submit schedule-release 6812783176 --version 0.7.0 --at 2026-10-01T09:00:00+09:00
+  ```
+
+  The date must be ISO 8601 **with a UTC offset** and in the future; spec key
+  `"releaseDate"`.
+
+- **Manual release** — `releaseType: MANUAL` leaves the release decision to
+  you after approval; `asc-submit wait` then resolves to
+  `PENDING_DEVELOPER_RELEASE` and reminds you the release is in your hands.
 
 ### Keywords and subtitles
 
@@ -184,12 +282,18 @@ to the commands above (and what `serve`'s URL looks like:
   guide says 100 *characters*); characters is the limit that multi-byte CJK
   keywords have actually been accepted against, so that is what this tool
   enforces — if your keywords are non-ASCII, keep an eye on the byte count too.
-- **Subtitles are app-level, not per version** (`appInfoLocalizations`). The app
-  keeps one appInfo per pipeline state, and only the one in an editable state
-  (`PREPARE_FOR_SUBMISSION`, `REJECTED`, …) accepts writes — which is why `run`
-  applies subtitles *after* creating the version. Calling the `subtitle`
+- **Subtitles, app names and privacy policy URLs are app-level, not per
+  version** (`appInfoLocalizations`). The app keeps one appInfo per pipeline
+  state, and only the one in an editable state (`PREPARE_FOR_SUBMISSION`,
+  `REJECTED`, …) accepts writes — which is why `run` applies these *after*
+  creating the version. Calling the `subtitle` / `app-name` / `privacy-url`
   subcommand while every version is live or in review fails with a hint to
-  create the next version first. 30-character limit, validated client-side.
+  create the next version first. Subtitles and names have a 30-character
+  limit, validated client-side.
+- **Version-level metadata** (What's New, description, keywords, promotional
+  text, support URL, marketing URL) travels with each version in
+  `appStoreVersionLocalizations`; promotional text is capped at 170 characters
+  and URLs must be http(s). `copyright` is set on the version itself.
 
 ## Individual commands
 
@@ -197,15 +301,25 @@ to the commands above (and what `serve`'s URL looks like:
 asc-submit versions 6812783176                       # list versions and states
 asc-submit status 6812783176 --version 0.7.0        # state, build, submission
 asc-submit create-version 6812783176 --version 0.7.0
+asc-submit phased-release 6812783176 --version 0.7.0 [--on|--off]
+asc-submit schedule-release 6812783176 --version 0.7.0 --at 2026-10-01T09:00:00+09:00
 asc-submit whatsnew 6812783176 --version 0.7.0 --locale ja --file whatsnew-ja.txt
 asc-submit description 6812783176 --version 0.7.0 --locale en-US --text "…"
 asc-submit keywords 6812783176 --version 0.7.0 --locale ja --text "録音,録画"
+asc-submit promotional-text 6812783176 --version 0.7.0 --locale ja --text "…"
+asc-submit support-url 6812783176 --version 0.7.0 --locale ja --text "https://…"
+asc-submit marketing-url 6812783176 --version 0.7.0 --locale ja --text "https://…"
+asc-submit copyright 6812783176 --version 0.7.0 --text "© 2026 …"
 asc-submit subtitle 6812783176 --locale ja --text "録って文字起こしするレコーダー"
+asc-submit app-name 6812783176 --locale ja --text "Kilde"
+asc-submit privacy-url 6812783176 --locale ja --text "https://…/privacy"
 asc-submit review-notes 6812783176 --version 0.7.0 --file notes.md
 asc-submit screenshots 6812783176 --version 0.7.0 --locale ja --replace shot-01.png shot-02.png
 asc-submit attach-build 6812783176 --version 0.7.0 --build 8 --wait
 asc-submit submit 6812783176 --version 0.7.0
 asc-submit cancel-submission 6812783176 --version 0.7.0
+asc-submit wait 6812783176 --version 0.7.0              # watch review to the outcome
+asc-submit validate --spec release-0.7.0.json           # offline spec lint (no key)
 asc-submit serve                                   # live browser view of runs
 asc-submit runs / runs <id> / logs <id> --follow   # journal from the terminal
 ```
@@ -218,6 +332,40 @@ asc-submit runs / runs <id> / logs <id> --follow   # journal from the terminal
 - Screenshot display type defaults to `APP_DESKTOP` (2880×1800 PNG/JPG).
 - Upload order defines display order — list files in the order you want them shown.
 
+## Using from GitHub Actions
+
+The repo doubles as a composite action, so a workflow can pin the exact commit
+(SHA) it runs — no marketplace, no version drift:
+
+```yaml
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: takezou621/asc-submit@<commit-sha>   # validate needs no secrets
+        with:
+          args: validate --spec release-0.7.0.json
+
+  release:
+    needs: validate
+    runs-on: [self-hosted, macOS]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: takezou621/asc-submit@<commit-sha>
+        with:
+          args: run 6812783176 --spec release-0.7.0.json --submit --yes
+          key-path: ${{ secrets.ASC_KEY_PEM }}     # .p8 path or PEM content
+          key-id: ${{ secrets.ASC_KEY_ID }}
+          issuer: ${{ secrets.ASC_ISSUER }}
+```
+
+`args` is split on whitespace (no quoted arguments — use `--file` for long
+text). The three key inputs map to the `ASC_KEY_PATH` / `ASC_KEY_ID` /
+`ASC_ISSUER` environment variables, so the key never appears in the command
+line or logs. The action installs asc-submit from the pinned checkout with
+`python3 -m pip`; nothing is pulled from PyPI.
+
 ## Error hints
 
 A `403 Forbidden` almost always means the API key was issued with the
@@ -227,11 +375,13 @@ App Manager key at *Users and Access → Integrations* and update
 
 ## Limitations (v1)
 
-- App-level metadata beyond the subtitle (privacy labels, pricing, availability)
-  is out of scope — those change rarely and are safer to manage in the web UI.
+- Privacy labels ("nutrition" labels), pricing and availability are out of
+  scope — those change rarely and are safer to manage in the web UI.
 - Screenshot upload order follows invocation order; drag-to-reorder parity in the
   media manager is not implemented.
 - App previews (videos) are not managed.
+- `wait` notifications are one Slack-style webhook POST per outcome — no email,
+  no richer formats (Discord/Teams adapters would wrap the same JSON).
 
 ## Development
 
@@ -241,6 +391,17 @@ python3 -m unittest discover -s tests -v
 
 The test suite generates its own throwaway P-256 keys and never talks to
 App Store Connect.
+
+Documentation beyond this README, under [`docs/`](docs/):
+
+- [docs/spec.md](docs/spec.md) — the complete release-spec reference: every
+  key, its type and limits, what `validate` checks, and the execution order.
+- [docs/journal.md](docs/journal.md) — the run journal format (`state.json`
+  + `output.log`), the `serve` JSON API, and how to read runs from scripts.
+- [docs/forensics.md](docs/forensics.md) — App Store Connect API findings
+  from production runs: the urllib stalls, the reviewSubmissions migration,
+  the to-one build relationship, the keywords chars-vs-bytes ambiguity, and
+  the 403-vs-404 doctor probe.
 
 ## License
 

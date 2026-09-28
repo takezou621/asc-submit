@@ -1,0 +1,39 @@
+name: "asc-submit"
+description: Ship an App Store version end to end through the App Store Connect API — zero Python dependencies.
+branding:
+  icon: upload-cloud
+  color: blue
+
+inputs:
+  args:
+    description: >-
+      asc-submit subcommand and arguments, e.g. "run 6812783176 --spec release.json --submit --yes".
+      Split on whitespace; quoted arguments are not supported (use --file for long text).
+    required: true
+  key-path:
+    description: Path to the .p8 key or its PEM content (from a secret). Maps to ASC_KEY_PATH.
+    default: ""
+  key-id:
+    description: App Store Connect API key id. Maps to ASC_KEY_ID.
+    default: ""
+  issuer:
+    description: App Store Connect issuer id. Maps to ASC_ISSUER.
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Install asc-submit
+      shell: bash
+      run: python3 -m pip install --quiet "${{ github.action_path }}"
+    - name: Run asc-submit
+      shell: bash
+      run: |
+        # env indirection keeps workflow input out of the script text
+        IFS=' ' read -r -a asci_args <<< "$ASCI_ARGS"
+        asc-submit "${asci_args[@]}"
+      env:
+        ASCI_ARGS: ${{ inputs.args }}
+        ASC_KEY_PATH: ${{ inputs.key-path }}
+        ASC_KEY_ID: ${{ inputs.key-id }}
+        ASC_ISSUER: ${{ inputs.issuer }}

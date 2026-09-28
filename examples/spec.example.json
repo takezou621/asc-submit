@@ -2,6 +2,7 @@
   "version": "0.7.0",
   "platform": "MAC_OS",
   "releaseType": "AFTER_APPROVAL",
+  "phasedRelease": true,
   "build": "8",
   "whatsNew": {
     "ja": "安定性と信頼性を改善しました。",
@@ -11,6 +12,10 @@
     "ja": "アプリの説明 (ja)。ASC は改行をそのまま表示します。",
     "en-US": "The app description (en-US). Line breaks are shown as-is."
   },
+  "promotionalText": {
+    "ja": "告知テキスト（170字まで）",
+    "en-US": "Promotional text (up to 170 chars)"
+  },
   "keywords": {
     "ja": "録音,録画,文字起こし",
     "en-US": "recorder,transcription,meeting"
@@ -18,6 +23,10 @@
   "subtitles": {
     "ja": "録って文字起こしするレコーダー",
     "en-US": "Record & transcribe meetings"
+  },
+  "supportUrls": {
+    "ja": "https://kilde.app/ja/support",
+    "en-US": "https://kilde.app/support"
   },
   "reviewNotes": "How to test this build for review: …",
   "screenshotDisplayType": "APP_DESKTOP",

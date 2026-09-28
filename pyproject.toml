@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "asc-submit"
-version = "0.3.0"
+version = "0.4.0"
 description = "Dependency-free CLI that ships an App Store version end to end: create the version, set What's New / descriptions / review notes / screenshots, attach a build, and submit for review."
 readme = "README.md"
 requires-python = ">=3.9"

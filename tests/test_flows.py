@@ -243,5 +243,214 @@ class SetSubtitlesTests(unittest.TestCase):
         self.assertFalse(client.patched and client.posted)
 
 
+class SetLocalizationsNewFieldsTests(unittest.TestCase):
+    def test_promotional_text_patches_existing_locale(self):
+        client = FakeClient(version_localizations=[localization("L1", "ja")])
+        flows.set_localizations(client, "V", promotional_text={"ja": "新機能！"})
+        path, body = client.patched[0]
+        self.assertEqual(path, "/v1/appStoreVersionLocalizations/L1")
+        self.assertEqual(body["data"]["attributes"], {"promotionalText": "新機能！"})
+
+    def test_urls_are_validated_before_any_write(self):
+        client = FakeClient(version_localizations=[localization("L1", "ja")])
+        with self.assertRaises(SystemExit):
+            flows.set_localizations(client, "V", support_urls={"ja": "ftp://example.com"})
+        with self.assertRaises(SystemExit):
+            flows.set_localizations(client, "V", marketing_urls={"ja": "example.com"})
+        self.assertFalse(client.patched and client.posted)
+
+    def test_promotional_text_limit_is_enforced(self):
+        client = FakeClient(version_localizations=[localization("L1", "ja")])
+        with self.assertRaises(SystemExit):
+            flows.set_localizations(client, "V", promotional_text={"ja": "字" * 171})
+        self.assertFalse(client.patched and client.posted)
+
+    def test_mixed_fields_merge_into_one_request_per_locale(self):
+        client = FakeClient(version_localizations=[])
+        flows.set_localizations(client, "V", whats_new={"ja": "x"}, support_urls={"ja": "https://kilde.app/"})
+        self.assertEqual(len(client.posted), 1)
+        attrs = client.posted[0][1]["data"]["attributes"]
+        self.assertEqual(attrs, {"locale": "ja", "whatsNew": "x", "supportUrl": "https://kilde.app/"})
+
+
+class SetAppInfoFieldsTests(unittest.TestCase):
+    def _client(self):
+        return FakeClient(
+            app_infos=[{"id": "INFO_EDIT", "attributes": {"state": "PREPARE_FOR_SUBMISSION"}}],
+            app_info_localizations={
+                "INFO_EDIT": [localization("AL1", "ja", name="Kilde", subtitle="旧")]
+            },
+        )
+
+    def test_names_and_privacy_urls_patch_the_editable_localization(self):
+        client = self._client()
+        flows.set_app_info_fields(
+            client, "APP", names={"ja": "Kilde 2"}, privacy_urls={"ja": "https://kilde.app/privacy"}
+        )
+        path, body = client.patched[0]
+        self.assertEqual(path, "/v1/appInfoLocalizations/AL1")
+        self.assertEqual(
+            body["data"]["attributes"],
+            {"name": "Kilde 2", "privacyPolicyUrl": "https://kilde.app/privacy"},
+        )
+
+    def test_name_limit_is_enforced_before_any_write(self):
+        client = self._client()
+        with self.assertRaises(SystemExit):
+            flows.set_app_info_fields(client, "APP", names={"ja": "字" * 31})
+        self.assertFalse(client.patched and client.posted)
+
+    def test_bad_privacy_url_is_rejected(self):
+        client = self._client()
+        with self.assertRaises(SystemExit):
+            flows.set_app_info_fields(client, "APP", privacy_urls={"ja": "kilde.app/privacy"})
+
+    def test_set_subtitles_delegates_to_set_app_info_fields(self):
+        client = self._client()
+        flows.set_subtitles(client, "APP", {"ja": "新"})
+        self.assertEqual(client.patched[0][1]["data"]["attributes"], {"subtitle": "新"})
+
+
+class ReleaseControlsTests(unittest.TestCase):
+    def _client(self, phased=None):
+        client = FakeClient()
+        client.get = mock.Mock(
+            side_effect=lambda path, query=None: (
+                {"data": phased} if path.endswith("appStoreVersionPhasedRelease") else {"data": []}
+            )
+        )
+        return client
+
+    def test_set_copyright_patches_the_version(self):
+        client = FakeClient()
+        flows.set_copyright(client, "V", "© 2026 Kilde")
+        path, body = client.patched[0]
+        self.assertEqual(path, "/v1/appStoreVersions/V")
+        self.assertEqual(body["data"]["attributes"], {"copyright": "© 2026 Kilde"})
+
+    def test_enable_phased_release_posts_with_relationship(self):
+        client = self._client(phased=None)
+        flows.enable_phased_release(client, "V")
+        path, body = client.posted[0]
+        self.assertEqual(path, "/v1/appStoreVersionPhasedRelease")
+        self.assertEqual(
+            body["data"]["relationships"]["appStoreVersion"]["data"],
+            {"type": "appStoreVersions", "id": "V"},
+        )
+
+    def test_enable_is_idempotent_when_already_enabled(self):
+        client = self._client(phased={"id": "PR1", "attributes": {"state": "INACTIVE"}})
+        flows.enable_phased_release(client, "V")
+        self.assertFalse(client.posted)
+
+    def test_disable_deletes_the_resource(self):
+        client = self._client(phased={"id": "PR1", "attributes": {"state": "ACTIVE"}})
+        flows.disable_phased_release(client, "V")
+        (path,) = client.delete.call_args[0]
+        self.assertEqual(path, "/v1/appStoreVersionPhasedRelease/PR1")
+
+    def test_disable_without_resource_is_a_noop(self):
+        client = self._client(phased=None)
+        flows.disable_phased_release(client, "V")
+        self.assertFalse(client.delete.called)
+
+    def test_set_release_date_patches_scheduled_type_and_datetime(self):
+        client = FakeClient()
+        when = "2027-01-15T09:00:00+09:00"
+        flows.set_release_date(client, "V", when)
+        path, body = client.patched[0]
+        self.assertEqual(path, "/v1/appStoreVersions/V")
+        self.assertEqual(body["data"]["attributes"]["releaseType"], "SCHEDULED")
+        self.assertEqual(body["data"]["attributes"]["releaseDateTime"], when)
+
+    def test_release_date_requires_a_utc_offset(self):
+        with self.assertRaises(SystemExit) as ctx:
+            flows.set_release_date(FakeClient(), "V", "2027-01-15T09:00:00")
+        self.assertIn("UTC offset", str(ctx.exception))
+
+    def test_release_date_rejects_the_past(self):
+        with self.assertRaises(SystemExit) as ctx:
+            flows.set_release_date(FakeClient(), "V", "2020-01-01T09:00:00+09:00")
+        self.assertIn("past", str(ctx.exception))
+
+    def test_release_date_rejects_garbage(self):
+        with self.assertRaises(SystemExit):
+            flows.set_release_date(FakeClient(), "V", "next tuesday")
+
+    def test_release_date_accepts_z_suffix(self):
+        client = FakeClient()
+        flows.set_release_date(client, "V", "2027-01-15T00:00:00Z")
+        self.assertEqual(
+            client.patched[0][1]["data"]["attributes"]["releaseDateTime"],
+            "2027-01-15T00:00:00+00:00",
+        )
+
+
+class WaitForReviewTests(unittest.TestCase):
+    def _client(self, states):
+        """GET appStoreVersions answers one version whose state advances per poll."""
+        holder = {"i": 0}
+
+        def fake_get_all(path, query=None):
+            self.assertEqual(path, "/v1/apps/APP/appStoreVersions")
+            i = min(holder["i"], len(states) - 1)
+            holder["i"] += 1
+            return [
+                {
+                    "id": "V1",
+                    "attributes": {"versionString": "0.9.0", "appStoreState": states[i]},
+                }
+            ]
+
+        client = mock.Mock()
+        client.get_all = mock.Mock(side_effect=fake_get_all)
+        return client
+
+    def test_resolves_through_transitions(self):
+        logs = []
+        version = flows.wait_for_review(
+            self._client(["WAITING_FOR_REVIEW", "IN_REVIEW", "READY_FOR_SALE"]),
+            "APP",
+            "0.9.0",
+            poll=0,
+            log=logs.append,
+        )
+        self.assertEqual(version["attributes"]["appStoreState"], "READY_FOR_SALE")
+        self.assertEqual(logs, ["state: WAITING_FOR_REVIEW", "state: IN_REVIEW", "state: READY_FOR_SALE"])
+
+    def test_already_released_returns_immediately(self):
+        version = flows.wait_for_review(self._client(["READY_FOR_SALE"]), "APP", "0.9.0", poll=0)
+        self.assertEqual(version["attributes"]["appStoreState"], "READY_FOR_SALE")
+
+    def test_rejection_is_returned_not_raised(self):
+        version = flows.wait_for_review(
+            self._client(["WAITING_FOR_REVIEW", "REJECTED"]), "APP", "0.9.0", poll=0
+        )
+        self.assertEqual(version["attributes"]["appStoreState"], "REJECTED")
+
+    def test_unsubmitted_draft_exits_with_guidance(self):
+        with self.assertRaises(SystemExit) as ctx:
+            flows.wait_for_review(self._client(["PREPARE_FOR_SUBMISSION"]), "APP", "0.9.0", poll=0)
+        self.assertIn("asc-submit submit", str(ctx.exception))
+
+    def test_timeout_raises(self):
+        with self.assertRaises(SystemExit) as ctx:
+            flows.wait_for_review(
+                self._client(["IN_REVIEW"]), "APP", "0.9.0", timeout=0.05, poll=0.01
+            )
+        self.assertIn("Timed out", str(ctx.exception))
+
+    def test_export_compliance_state_carries_a_hint(self):
+        logs = []
+        flows.wait_for_review(
+            self._client(["WAITING_FOR_EXPORT_COMPLIANCE", "IN_REVIEW", "READY_FOR_SALE"]),
+            "APP",
+            "0.9.0",
+            poll=0,
+            log=logs.append,
+        )
+        self.assertTrue(any("export-compliance" in line for line in logs))
+
+
 if __name__ == "__main__":
     unittest.main()
