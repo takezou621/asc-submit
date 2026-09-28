@@ -1,0 +1,24 @@
+README.md
+  h_864205080385bc 170-173
+asc_submit/cli.py
+  h_864205080385bc 105-106,160,165-166,169,324,331-335,535-546,568,570
+asc_submit/journal.py
+  h_864205080385bc 120-121,126-134,185-188
+asc_submit/server.py
+  h_864205080385bc 181-182,358
+tests/test_cli.py
+  h_864205080385bc 170-227
+tests/test_journal.py
+  h_864205080385bc 164-183
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "99696b8f6e05ba64bd8eb6aa92fc2a5b1265067a",
+  "prompts": {},
+  "humans": {
+    "h_864205080385bc": {
+      "author": "takezou621 <takezou621@gmail.com>"
+    }
+  }
+}
