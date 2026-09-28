@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -31,6 +32,7 @@ from .journal import (
 ENV_KEY_PATH = "ASC_KEY_PATH"
 ENV_KEY_ID = "ASC_KEY_ID"
 ENV_ISSUER = "ASC_ISSUER"
+ENV_WEBHOOK_URL = "ASC_WEBHOOK_URL"
 
 
 # ---------------------------------------------------------------------------
@@ -72,19 +74,216 @@ def load_spec(path: str) -> dict:
     return spec
 
 
+# ---------------------------------------------------------------------------
+# spec linting (validate, and the same check inside `run`)
+
+
+# Top-level keys a spec understands, with the JSON type each expects. Keys
+# starting with "_" are a comment convention and ignored.
+SPEC_KNOWN_KEYS = {
+    "version": str,
+    "platform": str,
+    "releaseType": str,
+    "releaseDate": str,
+    "phasedRelease": bool,
+    "build": str,
+    "whatsNew": dict,
+    "descriptions": dict,
+    "keywords": dict,
+    "promotionalText": dict,
+    "supportUrls": dict,
+    "marketingUrls": dict,
+    "subtitles": dict,
+    "appNames": dict,
+    "privacyUrls": dict,
+    "copyright": str,
+    "reviewNotes": str,
+    "screenshotDisplayType": str,
+    "screenshotsReplace": bool,
+    "screenshots": dict,
+    "submit": bool,
+}
+
+# Copy that was never finished. `run` ignores unknown keys silently, so a
+# mistyped "whatsnew" ships a release without its release notes — the lint
+# turns that class of mistake into a stop-the-line error.
+PLACEHOLDER_PATTERNS = [
+    re.compile(r"\btodo\b", re.IGNORECASE),
+    re.compile(r"\bfixme\b", re.IGNORECASE),
+    re.compile(r"\btbd\b", re.IGNORECASE),
+    re.compile(r"\btdb\b", re.IGNORECASE),
+    re.compile(r"lorem ipsum", re.IGNORECASE),
+    re.compile(r"<[a-zA-Z][^<>\n]{0,39}>"),  # "<app name>"-style template markers
+]
+
+SPEC_PLATFORMS = {"MAC_OS", "IOS", "TV_OS", "VISION_OS"}
+
+
+def _lint_text(field: str, text: str, errors: list[str]) -> None:
+    for pattern in PLACEHOLDER_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            errors.append(f"{field}: placeholder text {match.group(0)!r} — finish the copy before shipping")
+            return
+
+
+def _lint_keywords(field: str, text: str, errors: list[str], warnings: list[str]) -> None:
+    """Field-limit errors mirror what flows enforces at write time; the rest is advice."""
+    if "\n" in text or "\r" in text:
+        errors.append(f"{field}: line breaks are not allowed")
+    if len(text) > flows.KEYWORDS_MAX_CHARS:
+        errors.append(f"{field}: {len(text)} characters exceeds the {flows.KEYWORDS_MAX_CHARS}-character limit")
+    terms = [t.strip() for t in text.split(",")]
+    if "" in terms:
+        warnings.append(f"{field}: empty keyword term (double or trailing comma)")
+    counts: dict[str, int] = {}
+    for term in terms:
+        counts[term.casefold()] = counts.get(term.casefold(), 0) + 1
+    for term, n in sorted(counts.items()):
+        if term and n > 1:
+            warnings.append(f"{field}: duplicate keyword {term!r} — duplicates waste the character budget")
+    for raw, term in zip(text.split(","), terms):
+        # Check the raw term: padding around a comma is a space Apple counts too.
+        if term and re.search(r"\s", raw):
+            warnings.append(f"{field}: keyword {term!r} contains a space — Apple counts spaces toward the limit")
+    if len(text.encode("utf-8")) > flows.KEYWORDS_MAX_CHARS:
+        warnings.append(
+            f"{field}: {len(text.encode('utf-8'))} bytes — Apple's docs also cite a 100-byte limit; "
+            "multi-byte keywords may be truncated"
+        )
+
+
+def validate_spec(spec: dict) -> tuple[list[str], list[str]]:
+    """Offline spec lint. Returns (errors, warnings); errors stop a run."""
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    known_lower = {k.lower(): k for k in SPEC_KNOWN_KEYS}
+    for key in spec:
+        if key.startswith("_"):
+            continue
+        if key not in SPEC_KNOWN_KEYS:
+            suggestion = (
+                f" (did you mean {known_lower[key.lower()]!r}?)" if key.lower() in known_lower else ""
+            )
+            errors.append(f"unknown key {key!r}{suggestion}")
+        elif key == "build":
+            continue  # the dedicated check below has the better message
+        elif not isinstance(spec[key], SPEC_KNOWN_KEYS[key]):
+            errors.append(
+                f"{key}: expected {SPEC_KNOWN_KEYS[key].__name__}, got {type(spec[key]).__name__}"
+            )
+
+    if not isinstance(spec.get("version"), str) or not spec.get("version"):
+        errors.append('version: required, e.g. "0.7.0"')
+
+    if spec.get("platform") is not None and spec["platform"] not in SPEC_PLATFORMS:
+        errors.append(f"platform: {spec['platform']!r} is not one of {sorted(SPEC_PLATFORMS)}")
+    if spec.get("releaseType") is not None and spec["releaseType"] not in flows.RELEASE_TYPES:
+        errors.append(f"releaseType: {spec['releaseType']!r} is not one of {sorted(flows.RELEASE_TYPES)}")
+
+    # Locale-keyed text fields: placeholders everywhere, per-field limits where
+    # flows enforces them at write time.
+    text_field_limits = {
+        "keywords": None,  # audited separately
+        "subtitles": flows.SUBTITLE_MAX_CHARS,
+        "appNames": flows.APP_NAME_MAX_CHARS,
+        "promotionalText": flows.PROMOTIONAL_TEXT_MAX_CHARS,
+    }
+    for key in ("whatsNew", "descriptions", *text_field_limits):
+        mapping = spec.get(key)
+        if not isinstance(mapping, dict):
+            continue  # wrong-type error already recorded above
+        for locale, text in mapping.items():
+            field = f"{key}[{locale}]"
+            if not isinstance(text, str):
+                errors.append(f"{field}: expected text, got {type(text).__name__}")
+                continue
+            _lint_text(field, text, errors)
+            if key == "keywords":
+                _lint_keywords(field, text, errors, warnings)
+            elif text_field_limits.get(key) is not None:
+                if "\n" in text or "\r" in text:
+                    errors.append(f"{field}: line breaks are not allowed")
+                if len(text) > text_field_limits[key]:
+                    errors.append(
+                        f"{field}: {len(text)} characters exceeds the {text_field_limits[key]}-character limit"
+                    )
+    for key in ("supportUrls", "marketingUrls", "privacyUrls"):
+        mapping = spec.get(key)
+        if not isinstance(mapping, dict):
+            continue
+        for locale, url in mapping.items():
+            if isinstance(url, str) and not url.startswith(("http://", "https://")):
+                errors.append(f"{key}[{locale}]: must be an http(s) URL, got {url!r}")
+    if isinstance(spec.get("reviewNotes"), str):
+        _lint_text("reviewNotes", spec["reviewNotes"], errors)
+
+    if isinstance(spec.get("releaseDate"), str):
+        try:
+            flows.parse_release_date(spec["releaseDate"])
+        except SystemExit as err:
+            errors.append(str(err))
+    if spec.get("phasedRelease") and spec.get("releaseType") in {"MANUAL", "SCHEDULED"}:
+        warnings.append(
+            "phased release only takes effect when the version releases automatically "
+            "(releaseType AFTER_APPROVAL, the default)"
+        )
+
+    build = spec.get("build")
+    if build is not None and not isinstance(build, str):
+        errors.append(
+            f'build: expected a string like "8", got {type(build).__name__} — '
+            "a number never matches ASC build numbers at attach time"
+        )
+    if spec.get("submit") and build is None:
+        warnings.append("submit is set but build is not — App Review requires an attached build")
+
+    if isinstance(spec.get("screenshots"), dict):
+        for locale, files in spec["screenshots"].items():
+            if not isinstance(files, list) or not files:
+                errors.append(f"screenshots[{locale}]: expected a non-empty list of file paths")
+                continue
+            for f in files:
+                if not isinstance(f, str):
+                    errors.append(f"screenshots[{locale}]: file paths must be strings")
+                elif not Path(f).is_file():
+                    errors.append(f"screenshots[{locale}]: file not found: {f}")
+    return errors, warnings
+
+
 def spec_plan(spec: dict) -> list[str]:
     """Human-readable list of operations a `run` would perform."""
     plan = [f"create/resolve version {spec['version']}"]
+    if spec.get("releaseDate"):
+        plan.append(f"schedule release for {spec['releaseDate']}")
+    if spec.get("phasedRelease") is not None:
+        plan.append(f"phased release {'on' if spec['phasedRelease'] else 'off'}")
     if spec.get("build"):
         plan.append(f"attach build {spec['build']} (waiting for VALID state)")
-    if spec.get("whatsNew"):
-        plan.append(f"set What's New for: {', '.join(sorted(spec['whatsNew']))}")
-    if spec.get("descriptions"):
-        plan.append(f"set descriptions for: {', '.join(sorted(spec['descriptions']))}")
-    if spec.get("keywords"):
-        plan.append(f"set keywords for: {', '.join(sorted(spec['keywords']))}")
-    if spec.get("subtitles"):
-        plan.append(f"set subtitles for: {', '.join(sorted(spec['subtitles']))} (app-level)")
+    for label, key in (
+        ("What's New", "whatsNew"),
+        ("descriptions", "descriptions"),
+        ("keywords", "keywords"),
+        ("promotional text", "promotionalText"),
+        ("support URLs", "supportUrls"),
+        ("marketing URLs", "marketingUrls"),
+    ):
+        if spec.get(key):
+            plan.append(f"set {label} for: {', '.join(sorted(spec[key]))}")
+    if spec.get("copyright"):
+        plan.append(f"set copyright: {spec['copyright']}")
+    app_level = [
+        f"{label} for: {', '.join(sorted(spec[key]))}"
+        for label, key in (
+            ("subtitles", "subtitles"),
+            ("app names", "appNames"),
+            ("privacy URLs", "privacyUrls"),
+        )
+        if spec.get(key)
+    ]
+    if app_level:
+        plan.extend(f"set {line} (app-level)" for line in app_level)
     if spec.get("reviewNotes"):
         plan.append("update App Review notes")
     for locale, files in sorted((spec.get("screenshots") or {}).items()):
@@ -113,6 +312,17 @@ def run_spec(
         version_id = version["id"]
         journal.log(f"version {version_string} ready ({version_id}, {version['attributes'].get('appStoreState', '?')})")
 
+    if spec.get("releaseDate"):
+        with journal.step(f"schedule release for {spec['releaseDate']}"):
+            flows.set_release_date(client, version_id, spec["releaseDate"])
+            journal.log(f"release scheduled for {spec['releaseDate']}")
+
+    if spec.get("phasedRelease") is not None:
+        enabled = bool(spec["phasedRelease"])
+        with journal.step(f"phased release {'on' if enabled else 'off'}"):
+            (flows.enable_phased_release if enabled else flows.disable_phased_release)(client, version_id)
+            journal.log("phased release updated")
+
     build = spec.get("build")
     if build:
         with journal.step(f"attach build {build}"):
@@ -123,19 +333,42 @@ def run_spec(
             flows.attach_build(client, version_id, app_id, build)
             journal.log(f"build {build} attached")
 
-    if spec.get("whatsNew") or spec.get("descriptions") or spec.get("keywords"):
-        locales = sorted(set(spec.get("whatsNew") or {}) | set(spec.get("descriptions") or {}) | set(spec.get("keywords") or {}))
+    version_locale_keys = ("whatsNew", "descriptions", "keywords", "promotionalText", "supportUrls", "marketingUrls")
+    if any(spec.get(k) for k in version_locale_keys):
+        locales = sorted(set().union(*(set(spec.get(k) or {}) for k in version_locale_keys)))
         with journal.step(f"update localizations ({', '.join(locales)})"):
-            flows.set_localizations(client, version_id, spec.get("whatsNew"), spec.get("descriptions"), spec.get("keywords"))
+            flows.set_localizations(
+                client,
+                version_id,
+                whats_new=spec.get("whatsNew"),
+                descriptions=spec.get("descriptions"),
+                keywords=spec.get("keywords"),
+                promotional_text=spec.get("promotionalText"),
+                support_urls=spec.get("supportUrls"),
+                marketing_urls=spec.get("marketingUrls"),
+            )
             journal.log("localizations updated")
 
-    # Subtitles are app-level and need the just-created version's appInfo in an
-    # editable state — which create_version above just ensured — so this comes
-    # after it, not before.
-    if spec.get("subtitles"):
-        with journal.step(f"set subtitles ({', '.join(sorted(spec['subtitles']))}, app-level)"):
-            flows.set_subtitles(client, app_id, spec["subtitles"])
-            journal.log("subtitles updated")
+    # Subtitles, app names and privacy URLs are app-level and need the
+    # just-created version's appInfo in an editable state — which
+    # create_version above just ensured — so this comes after it, not before.
+    app_level_keys = ("subtitles", "appNames", "privacyUrls")
+    if any(spec.get(k) for k in app_level_keys):
+        parts = [k for k in app_level_keys if spec.get(k)]
+        with journal.step(f"set app-level metadata ({', '.join(parts)})"):
+            flows.set_app_info_fields(
+                client,
+                app_id,
+                subtitles=spec.get("subtitles"),
+                names=spec.get("appNames"),
+                privacy_urls=spec.get("privacyUrls"),
+            )
+            journal.log("app-level metadata updated")
+
+    if spec.get("copyright"):
+        with journal.step("set copyright"):
+            flows.set_copyright(client, version_id, spec["copyright"])
+            journal.log(f"copyright: {spec['copyright']}")
 
     if spec.get("reviewNotes"):
         with journal.step("update App Review notes"):
@@ -222,6 +455,37 @@ def cmd_create_version(client: Client, args) -> None:
     print(f"version {v['attributes']['versionString']} ready: {v['id']} ({v['attributes']['appStoreState']})")
 
 
+def cmd_phased_release(client: Client, args) -> None:
+    version = flows.require_version(client, args.app, args.version)
+    if args.on:
+        flows.enable_phased_release(client, version["id"])
+        print(f"phased release on for {args.version}: the 7-day curve starts when the version releases")
+        return
+    if args.off:
+        flows.disable_phased_release(client, version["id"])
+        print(f"phased release off for {args.version}: everyone gets the update at once")
+        return
+    phased = flows.get_phased_release(client, version["id"])
+    if phased is None:
+        print(f"phased release: disabled (version {args.version} releases to everyone at once)")
+        return
+    a = phased.get("attributes", {})
+    state = a.get("state", "?")
+    if state == "ACTIVE":
+        detail = f"day {a.get('currentDay', '?')}/{a.get('totalDays', '?')}"
+    elif a.get("startDate"):
+        detail = f"starts {a['startDate']}"
+    else:
+        detail = "starts when the version releases"
+    print(f"phased release: enabled — {state} ({detail})")
+
+
+def cmd_schedule_release(client: Client, args) -> None:
+    version = flows.require_version(client, args.app, args.version)
+    flows.set_release_date(client, version["id"], args.at)
+    print(f"version {args.version} scheduled for release at {args.at}")
+
+
 def cmd_whatsnew(client: Client, args) -> None:
     version = flows.require_version(client, args.app, args.version)
     text = read_text(args)
@@ -243,10 +507,44 @@ def cmd_keywords(client: Client, args) -> None:
     print(f"keywords for {args.locale} updated")
 
 
+def cmd_promotional_text(client: Client, args) -> None:
+    version = flows.require_version(client, args.app, args.version)
+    flows.set_localizations(client, version["id"], promotional_text={args.locale: read_text(args)})
+    print(f"promotional text for {args.locale} updated")
+
+
+def cmd_support_url(client: Client, args) -> None:
+    version = flows.require_version(client, args.app, args.version)
+    flows.set_localizations(client, version["id"], support_urls={args.locale: read_text(args)})
+    print(f"support URL for {args.locale} updated")
+
+
+def cmd_marketing_url(client: Client, args) -> None:
+    version = flows.require_version(client, args.app, args.version)
+    flows.set_localizations(client, version["id"], marketing_urls={args.locale: read_text(args)})
+    print(f"marketing URL for {args.locale} updated")
+
+
 def cmd_subtitle(client: Client, args) -> None:
     text = read_text(args)
     flows.set_subtitles(client, args.app, {args.locale: text})
     print(f"subtitle for {args.locale} updated")
+
+
+def cmd_app_name(client: Client, args) -> None:
+    flows.set_app_info_fields(client, args.app, names={args.locale: read_text(args)})
+    print(f"app name for {args.locale} updated")
+
+
+def cmd_privacy_url(client: Client, args) -> None:
+    flows.set_app_info_fields(client, args.app, privacy_urls={args.locale: read_text(args)})
+    print(f"privacy policy URL for {args.locale} updated")
+
+
+def cmd_copyright(client: Client, args) -> None:
+    version = flows.require_version(client, args.app, args.version)
+    flows.set_copyright(client, version["id"], read_text(args))
+    print("copyright updated")
 
 
 def cmd_review_notes(client: Client, args) -> None:
@@ -293,16 +591,134 @@ def cmd_cancel_submission(client: Client, args) -> None:
     print("submission cancelled")
 
 
-def cmd_run(client: Client | None, args) -> None:
+def _rejection_message(version: str, state: str) -> str:
+    if state == "DEVELOPER_REJECTED":
+        return f"version {version}: the submission was withdrawn by the developer (DEVELOPER_REJECTED)"
+    if state == "METADATA_REJECTED":
+        return f"version {version}: {state} — App Review found a metadata problem; see App Store Connect for what to fix"
+    return (
+        f"version {version}: {state} — see the rejection notes in App Store Connect "
+        "(your app → the version → Review Information)"
+    )
+
+
+def notify_webhook(url: str, text: str, log=lambda m: print(m, flush=True)) -> bool:
+    """POST one Slack-style {"text": …} message. Never raises: a failed
+    notification must not mask the outcome it was reporting."""
+    from .client import _curl
+
+    try:
+        status, payload = _curl(
+            "POST",
+            url,
+            {"Content-Type": "application/json"},
+            json.dumps({"text": text}).encode("utf-8"),
+            15,
+        )
+    except (Exception, SystemExit) as err:
+        log(f"warning: webhook notification failed: {err}")
+        return False
+    if status >= 300:
+        log(f"warning: webhook answered HTTP {status}: {payload.decode(errors='replace')[:200]}")
+        return False
+    return True
+
+
+def cmd_wait(client: Client, args) -> None:
+    """Watch the version's review until it resolves; exit 0 on approval/release."""
+    webhook = args.webhook or os.environ.get(ENV_WEBHOOK_URL) or None
+    journal = RunJournal(
+        command="wait",
+        title=f"{args.app} → {args.version}: review watch",
+        meta={"app": args.app, "version": args.version},
+        runs_dir=getattr(args, "runs_dir", None),
+    )
+    journal.start()
+    journal.log(
+        f"run {journal.run_id} — follow live with 'asc-submit serve' "
+        f"(http://127.0.0.1:8756) or 'asc-submit logs {journal.run_id} --follow'"
+    )
+    try:
+        with journal.step(f"wait for review outcome ({args.version})"):
+            version = flows.wait_for_review(
+                client,
+                args.app,
+                args.version,
+                timeout=args.timeout,
+                poll=args.interval,
+                log=journal.log,
+            )
+            state = version["attributes"].get("appStoreState", "?")
+            if state in flows.REJECTED_STATES:
+                raise SystemExit(_rejection_message(args.version, state))
+        if state == "PENDING_DEVELOPER_RELEASE":
+            message = (
+                f"review approved — version {args.version} now waits for your manual "
+                "release (releaseType MANUAL) in App Store Connect"
+            )
+        else:
+            message = f"version {args.version} is READY_FOR_SALE — live on the App Store"
+        journal.log(message)
+        journal.succeed()
+        if webhook:
+            notify_webhook(webhook, f"asc-submit: {message}", log=journal.log)
+    except KeyboardInterrupt:
+        journal.cancel("interrupted (Ctrl-C)")
+        raise
+    except SystemExit as err:
+        journal.fail(str(err) or type(err).__name__)
+        if webhook:
+            notify_webhook(
+                webhook,
+                f"asc-submit: review watch of {args.version} ended without approval: {err}",
+                log=journal.log,
+            )
+        raise
+    except BaseException as err:  # ApiError / anything else
+        journal.fail(str(err) or type(err).__name__)
+        raise
+
+
+def cmd_validate(args) -> None:
+    """Offline spec lint — no API key, nothing leaves the machine."""
+    try:
+        spec = json.loads(Path(args.spec).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as err:
+        raise SystemExit(f"{args.spec}: cannot read spec: {err}")
+    if not isinstance(spec, dict):
+        raise SystemExit(f"{args.spec}: the spec must be a JSON object")
+    errors, warnings = validate_spec(spec)
+    for w in warnings:
+        print(f"warning: {w}")
+    for e in errors:
+        print(f"error: {e}")
+    if not errors and not warnings:
+        print(f"{args.spec}: no issues found")
+        return
+    if errors:
+        print(f"{args.spec}: {len(errors)} error(s), {len(warnings)} warning(s)", file=sys.stderr)
+        sys.exit(1)
+    print(f"{args.spec}: {len(warnings)} warning(s)")
+
+
+def cmd_run(args) -> None:
     spec = load_spec(args.spec)
+    # Lint before anything else — a bad spec fails here, without an API key,
+    # so PR-time checks catch it before any secret is even configured.
+    errors, warnings = validate_spec(spec)
+    for w in warnings:
+        print(f"warning: {w}")
+    if errors:
+        for e in errors:
+            print(f"error: {e}", file=sys.stderr)
+        raise SystemExit(f"{args.spec}: {len(errors)} error(s) — the spec was not executed")
     if args.dry_run:
-        # Plan printing touches nothing, so main() skips client construction
-        # and this runs without any API key configured (see main()).
+        # Plan printing touches nothing; no API key needed (see main()).
         print(f"plan for app {args.app}:")
         for line in spec_plan(spec):
             print(f"  - {line}")
         return
-    assert client is not None  # main() guarantees a client outside --dry-run
+    client = build_client(args)
     journal = RunJournal(
         command="run",
         title=f"{args.app} → {spec['version']}",
@@ -582,7 +998,7 @@ def cmd_runs(args) -> None:
     runs = list_runs(root)
     if not runs:
         print(f"no workflow runs recorded under {root}")
-        print("runs are recorded by 'asc-submit run' and 'asc-submit upload'")
+        print("runs are recorded by 'asc-submit run', 'upload' and 'wait'")
         return
     print(f"{'run id':<22} {'status':<10} {'command':<8} title")
     for run in runs:
@@ -651,6 +1067,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--platform", default=flows.MACOS_PLATFORM, help="MAC_OS (default), IOS, TV_OS, VISION_OS")
     p.set_defaults(func=cmd_create_version)
 
+    p = add("phased-release", "show/enable/disable the 7-day phased release curve")
+    add_app_and_version(p)
+    p.add_argument("--on", action="store_true", help="enable phased release")
+    p.add_argument("--off", action="store_true", help="disable phased release (release to everyone at once)")
+    p.set_defaults(func=cmd_phased_release)
+
+    p = add("schedule-release", "set releaseType SCHEDULED with a fixed release date and time")
+    add_app_and_version(p)
+    p.add_argument("--at", required=True, help="ISO 8601 with UTC offset, e.g. 2026-10-01T09:00:00+09:00")
+    p.set_defaults(func=cmd_schedule_release)
+
     p = add("whatsnew", "set the What's New text for one locale")
     add_app_and_version(p)
     p.add_argument("--locale", required=True, help="e.g. ja, en-US, zh-Hans, ko, es-ES")
@@ -667,10 +1094,31 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = add("keywords", "set the keywords for one locale (comma-separated, single line)")
     add_app_and_version(p)
-    p.add_argument("--locale", required=True)
+    p.add_argument("--locale", required=True, help="e.g. ja, en-US, zh-Hans, ko, es-ES")
     p.add_argument("--text")
     p.add_argument("--file")
     p.set_defaults(func=cmd_keywords)
+
+    p = add("promotional-text", "set the promotional text for one locale (above the description, 170 chars)")
+    add_app_and_version(p)
+    p.add_argument("--locale", required=True)
+    p.add_argument("--text")
+    p.add_argument("--file")
+    p.set_defaults(func=cmd_promotional_text)
+
+    p = add("support-url", "set the support URL for one locale (version-level)")
+    add_app_and_version(p)
+    p.add_argument("--locale", required=True)
+    p.add_argument("--text", help="the URL")
+    p.add_argument("--file")
+    p.set_defaults(func=cmd_support_url)
+
+    p = add("marketing-url", "set the marketing URL for one locale (version-level)")
+    add_app_and_version(p)
+    p.add_argument("--locale", required=True)
+    p.add_argument("--text", help="the URL")
+    p.add_argument("--file")
+    p.set_defaults(func=cmd_marketing_url)
 
     p = add(
         "subtitle",
@@ -681,6 +1129,32 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--text")
     p.add_argument("--file")
     p.set_defaults(func=cmd_subtitle)
+
+    p = add(
+        "app-name",
+        "set the app name for one locale (app-level: needs a version in an editable state)",
+    )
+    p.add_argument("app", help="Apple ID of the app, or its bundle ID")
+    p.add_argument("--locale", required=True)
+    p.add_argument("--text")
+    p.add_argument("--file")
+    p.set_defaults(func=cmd_app_name)
+
+    p = add(
+        "privacy-url",
+        "set the privacy policy URL for one locale (app-level: needs a version in an editable state)",
+    )
+    p.add_argument("app", help="Apple ID of the app, or its bundle ID")
+    p.add_argument("--locale", required=True)
+    p.add_argument("--text", help="the URL")
+    p.add_argument("--file")
+    p.set_defaults(func=cmd_privacy_url)
+
+    p = add("copyright", "set the version's copyright line (not localized)")
+    add_app_and_version(p)
+    p.add_argument("--text")
+    p.add_argument("--file")
+    p.set_defaults(func=cmd_copyright)
 
     p = add("review-notes", "replace the App Review Information notes")
     add_app_and_version(p)
@@ -712,6 +1186,25 @@ def build_parser() -> argparse.ArgumentParser:
     add_app_and_version(p)
     p.set_defaults(func=cmd_cancel_submission)
 
+    p = add(
+        "wait",
+        "watch the version's review until it resolves (approval, release or rejection)",
+    )
+    add_app_and_version(p)
+    p.add_argument(
+        "--timeout",
+        type=int,
+        default=432000,
+        help="give up after this many seconds (default 432000 = 5 days; 0 = wait forever)",
+    )
+    p.add_argument("--interval", type=int, default=300, help="poll interval in seconds (default 300)")
+    p.add_argument(
+        "--webhook",
+        help=f"POST the outcome to this URL as {{\"text\": …}} (env: {ENV_WEBHOOK_URL})",
+    )
+    p.add_argument("--runs-dir", help=f"where to record this run (env: {RUNS_DIR_ENV}; default {DEFAULT_RUNS_DIR})")
+    p.set_defaults(func=cmd_wait)
+
     p = add("doctor", "check whether this API key can ship a version (no side effects)")
     p.add_argument("app", help="Apple ID of the app, or its bundle ID")
     p.set_defaults(func=cmd_doctor)
@@ -733,6 +1226,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--runs-dir", help=f"where to record this run (env: {RUNS_DIR_ENV}; default {DEFAULT_RUNS_DIR})")
     p.add_argument("-v", "--verbose", action="store_true", help="print full xcodebuild output")
     p.set_defaults(func=cmd_upload)
+
+    # validate lints a spec file offline; like the journal readers it needs no
+    # API key, so no auth arguments.
+    p = sub.add_parser("validate", help="lint a release spec — placeholders, limits, key typos (no API key)")
+    p.add_argument("--spec", required=True, help="path to the JSON spec")
+    p.set_defaults(func=cmd_validate)
 
     p = add("run", "run a whole shipping plan from a JSON spec")
     p.add_argument("app", help="Apple ID of the app, or its bundle ID")
@@ -770,14 +1269,15 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
-        if args.command in {"upload", "serve", "runs", "logs"}:
+        if args.command in {"upload", "serve", "runs", "logs", "validate"}:
             # xcodebuild path and journal readers: no API key required.
             args.func(args)
             return 0
-        if args.command == "run" and args.dry_run:
-            # --dry-run only prints the plan; keep it keyless so CI can
-            # validate a spec before any secret is configured.
-            args.func(None, args)
+        if args.command == "run":
+            # cmd_run lints the spec keylessly, then either prints the --dry-run
+            # plan or builds the client itself — so a bad spec fails before any
+            # secret is needed (CI can validate specs on every PR).
+            args.func(args)
             return 0
         client = build_client(args)
         args.func(client, args)

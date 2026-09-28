@@ -3,6 +3,10 @@
 Each function is idempotent where Apple allows it: existing resources are
 updated rather than duplicated, so re-running a submit flow after a partial
 failure is safe.
+
+The API quirks this module works around (the reviewSubmissions migration,
+the to-one build relationship, the MAC_OS enum, editable appInfo states) are
+documented with their production evidence in docs/forensics.md.
 """
 
 from __future__ import annotations
@@ -10,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import sys
 import time
+from datetime import datetime
 
 from .client import ApiError, Client
 
@@ -35,6 +40,8 @@ def normalize_locale(locale: str) -> str:
 # we enforce — callers with non-ASCII keywords should still keep an eye on bytes.
 KEYWORDS_MAX_CHARS = 100
 SUBTITLE_MAX_CHARS = 30
+APP_NAME_MAX_CHARS = 30
+PROMOTIONAL_TEXT_MAX_CHARS = 170
 
 
 def _validate_localized_text(field: str, value: str, max_chars: int) -> str:
@@ -42,6 +49,12 @@ def _validate_localized_text(field: str, value: str, max_chars: int) -> str:
         raise SystemExit(f"{field}: line breaks are not allowed (ASC renders the field as a single line)")
     if len(value) > max_chars:
         raise SystemExit(f"{field}: {len(value)} characters exceeds the {max_chars}-character limit")
+    return value
+
+
+def _validate_url(field: str, value: str) -> str:
+    if not value.startswith(("http://", "https://")):
+        raise SystemExit(f"{field}: must be an http(s) URL, got {value!r}")
     return value
 
 
@@ -186,7 +199,11 @@ def attach_build(client: Client, version_id: str, app_id: str, build_string: str
 def _localizations(client: Client, version_id: str) -> dict[str, dict]:
     found = client.get_all(
         f"/v1/appStoreVersions/{version_id}/appStoreVersionLocalizations",
-        {"fields[appStoreVersionLocalizations]": "locale,whatsNew,description,keywords"},
+        {
+            "fields[appStoreVersionLocalizations]": (
+                "locale,whatsNew,description,keywords,promotionalText,supportUrl,marketingUrl"
+            )
+        },
     )
     return {loc["attributes"]["locale"]: loc for loc in found}
 
@@ -197,26 +214,35 @@ def set_localizations(
     whats_new: dict[str, str] | None = None,
     descriptions: dict[str, str] | None = None,
     keywords: dict[str, str] | None = None,
+    promotional_text: dict[str, str] | None = None,
+    support_urls: dict[str, str] | None = None,
+    marketing_urls: dict[str, str] | None = None,
 ) -> None:
-    """Set What's New, description and/or keywords text per locale (PATCH or POST)."""
-    whats_new = {normalize_locale(k): v for k, v in (whats_new or {}).items()}
-    descriptions = {normalize_locale(k): v for k, v in (descriptions or {}).items()}
-    keywords = {
-        normalize_locale(k): _validate_localized_text(f"keywords[{k}]", v, KEYWORDS_MAX_CHARS)
-        for k, v in (keywords or {}).items()
+    """Set version-localized metadata per locale (PATCH or POST)."""
+    field_sets = {
+        "whatsNew": {normalize_locale(k): v for k, v in (whats_new or {}).items()},
+        "description": {normalize_locale(k): v for k, v in (descriptions or {}).items()},
+        "keywords": {
+            normalize_locale(k): _validate_localized_text(f"keywords[{k}]", v, KEYWORDS_MAX_CHARS)
+            for k, v in (keywords or {}).items()
+        },
+        "promotionalText": {
+            normalize_locale(k): _validate_localized_text(f"promotionalText[{k}]", v, PROMOTIONAL_TEXT_MAX_CHARS)
+            for k, v in (promotional_text or {}).items()
+        },
+        "supportUrl": {
+            normalize_locale(k): _validate_url(f"supportUrl[{k}]", v) for k, v in (support_urls or {}).items()
+        },
+        "marketingUrl": {
+            normalize_locale(k): _validate_url(f"marketingUrl[{k}]", v) for k, v in (marketing_urls or {}).items()
+        },
     }
-    if not whats_new and not descriptions and not keywords:
+    if not any(field_sets.values()):
         return
     existing = _localizations(client, version_id)
 
-    for locale in sorted(set(whats_new) | set(descriptions) | set(keywords)):
-        attrs = {}
-        if locale in whats_new:
-            attrs["whatsNew"] = whats_new[locale]
-        if locale in descriptions:
-            attrs["description"] = descriptions[locale]
-        if locale in keywords:
-            attrs["keywords"] = keywords[locale]
+    for locale in sorted(set().union(*(set(s) for s in field_sets.values()))):
+        attrs = {attr: values[locale] for attr, values in field_sets.items() if locale in values}
         if not attrs:
             continue
         if locale in existing:
@@ -275,28 +301,47 @@ def editable_app_info(client: Client, app_id: str) -> dict:
 def _app_info_localizations(client: Client, app_info_id: str) -> dict[str, dict]:
     found = client.get_all(
         f"/v1/appInfos/{app_info_id}/appInfoLocalizations",
-        {"fields[appInfoLocalizations]": "locale,name,subtitle"},
+        {"fields[appInfoLocalizations]": "locale,name,subtitle,privacyPolicyUrl"},
     )
     return {loc["attributes"]["locale"]: loc for loc in found}
 
 
-def set_subtitles(client: Client, app_id: str, subtitles: dict[str, str]) -> None:
-    """Set the app subtitle per locale (PATCH or POST on the editable appInfo)."""
-    subtitles = {
-        normalize_locale(k): _validate_localized_text(f"subtitle[{k}]", v, SUBTITLE_MAX_CHARS)
-        for k, v in (subtitles or {}).items()
+def set_app_info_fields(
+    client: Client,
+    app_id: str,
+    subtitles: dict[str, str] | None = None,
+    names: dict[str, str] | None = None,
+    privacy_urls: dict[str, str] | None = None,
+) -> None:
+    """Set app-level localized metadata (subtitle, name, privacy policy URL)
+    on the editable appInfo (PATCH or POST)."""
+    field_sets = {
+        "subtitle": {
+            normalize_locale(k): _validate_localized_text(f"subtitle[{k}]", v, SUBTITLE_MAX_CHARS)
+            for k, v in (subtitles or {}).items()
+        },
+        "name": {
+            normalize_locale(k): _validate_localized_text(f"name[{k}]", v, APP_NAME_MAX_CHARS)
+            for k, v in (names or {}).items()
+        },
+        "privacyPolicyUrl": {
+            normalize_locale(k): _validate_url(f"privacyPolicyUrl[{k}]", v)
+            for k, v in (privacy_urls or {}).items()
+        },
     }
-    if not subtitles:
+    if not any(field_sets.values()):
         return
     info = editable_app_info(client, app_id)
     existing = _app_info_localizations(client, info["id"])
 
-    for locale in sorted(subtitles):
-        attrs = {"subtitle": subtitles[locale]}
+    for locale in sorted(set().union(*(set(s) for s in field_sets.values()))):
+        attrs = {attr: values[locale] for attr, values in field_sets.items() if locale in values}
+        if not attrs:
+            continue
         if locale in existing:
             client.patch(
                 f"/v1/appInfoLocalizations/{existing[locale]['id']}",
-                {"data": {"type": "appInfoLocalizations", "id": existing[locale]["id"], "attributes": attrs}},
+                {"data": {"type": "appInfoLocalizations", "id": existing[locale]['id'], "attributes": attrs}},
             )
         else:
             client.post(
@@ -309,6 +354,11 @@ def set_subtitles(client: Client, app_id: str, subtitles: dict[str, str]) -> Non
                     }
                 },
             )
+
+
+def set_subtitles(client: Client, app_id: str, subtitles: dict[str, str]) -> None:
+    """Set the app subtitle per locale (PATCH or POST on the editable appInfo)."""
+    set_app_info_fields(client, app_id, subtitles=subtitles)
 
 
 # ---------------------------------------------------------------------------
@@ -341,6 +391,83 @@ def set_review_notes(client: Client, version_id: str, notes: str) -> None:
     client.patch(
         f"/v1/appStoreReviewDetails/{detail['id']}",
         {"data": {"type": "appStoreReviewDetails", "id": detail["id"], "attributes": {"notes": notes}}},
+    )
+
+
+# ---------------------------------------------------------------------------
+# release controls (copyright, phased release, scheduled date)
+
+
+def set_copyright(client: Client, version_id: str, text: str) -> None:
+    """Set the version's copyright line (not localized)."""
+    client.patch(
+        f"/v1/appStoreVersions/{version_id}",
+        {"data": {"type": "appStoreVersions", "id": version_id, "attributes": {"copyright": text}}},
+    )
+
+
+def get_phased_release(client: Client, version_id: str) -> dict | None:
+    """Return the version's appStoreVersionPhasedRelease resource, if any."""
+    try:
+        doc = client.get(f"/v1/appStoreVersions/{version_id}/appStoreVersionPhasedRelease")
+    except ApiError as err:
+        if err.status == 404:
+            return None
+        raise
+    return doc.get("data")
+
+
+def enable_phased_release(client: Client, version_id: str) -> None:
+    """Turn on the 7-day phased release curve (idempotent)."""
+    if get_phased_release(client, version_id) is not None:
+        return
+    client.post(
+        "/v1/appStoreVersionPhasedRelease",
+        {
+            "data": {
+                "type": "appStoreVersionPhasedRelease",
+                "relationships": {
+                    "appStoreVersion": {"data": {"type": "appStoreVersions", "id": version_id}}
+                },
+            }
+        },
+    )
+
+
+def disable_phased_release(client: Client, version_id: str) -> None:
+    """Turn off phased release: everyone gets the update at once (idempotent)."""
+    phased = get_phased_release(client, version_id)
+    if phased is not None:
+        client.delete(f"/v1/appStoreVersionPhasedRelease/{phased['id']}")
+
+
+def parse_release_date(when: str) -> datetime:
+    """Parse an ISO 8601 release date; require a UTC offset and a future moment."""
+    normalized = when[:-1] + "+00:00" if when.endswith(("Z", "z")) else when
+    try:
+        moment = datetime.fromisoformat(normalized)
+    except ValueError:
+        raise SystemExit(f"release date {when!r} is not ISO 8601 — e.g. 2026-10-01T09:00:00+09:00")
+    if moment.tzinfo is None:
+        raise SystemExit(f"release date {when!r} must include a UTC offset, e.g. 2026-10-01T09:00:00+09:00")
+    if moment <= datetime.now(moment.tzinfo):
+        raise SystemExit(f"release date {when!r} is in the past")
+    return moment
+
+
+def set_release_date(client: Client, version_id: str, when: str) -> dict:
+    """Set releaseType SCHEDULED with releaseDateTime (the date only takes
+    effect for scheduled releases, so both travel together)."""
+    moment = parse_release_date(when)
+    return client.patch(
+        f"/v1/appStoreVersions/{version_id}",
+        {
+            "data": {
+                "type": "appStoreVersions",
+                "id": version_id,
+                "attributes": {"releaseType": "SCHEDULED", "releaseDateTime": moment.isoformat()},
+            }
+        },
     )
 
 
@@ -575,3 +702,67 @@ def cancel_submission(client: Client, version_id: str) -> None:
         client.delete(f"/v1/appStoreVersionSubmissions/{submission['id']}")
         return
     client.delete(f"/v1/reviewSubmissions/{sub['id']}")
+
+
+# ---------------------------------------------------------------------------
+# review outcome
+
+
+# Terminal appStoreState values — everything a `wait` can resolve to.
+# PENDING_DEVELOPER_RELEASE means review *passed* and releaseType MANUAL has
+# the release itself waiting on the developer, so it counts as approved.
+APPROVED_STATES = {"READY_FOR_SALE", "PENDING_DEVELOPER_RELEASE"}
+REJECTED_STATES = {"REJECTED", "DEVELOPER_REJECTED", "METADATA_REJECTED"}
+
+STATE_HINTS = {
+    "WAITING_FOR_EXPORT_COMPLIANCE": (
+        "the export-compliance question is unanswered — review will not "
+        "progress until it is answered in App Store Connect"
+    ),
+}
+
+
+def wait_for_review(
+    client: Client,
+    app_id: str,
+    version_string: str,
+    timeout: int = 432000,
+    poll: int = 300,
+    log=lambda msg: print(msg, flush=True),
+) -> dict:
+    """Poll the version's App Store state until review resolves; return the version.
+
+    The returned resource's ``appStoreState`` tells the outcome (APPROVED_STATES
+    vs REJECTED_STATES). Raises SystemExit when the version was never submitted
+    (still PREPARE_FOR_SUBMISSION) or when ``timeout`` seconds elapse
+    (0 = wait forever). ``poll`` is the interval between checks.
+    """
+    version = require_version(client, app_id, version_string)
+    started = time.time()
+    deadline = started + timeout if timeout > 0 else None
+    last_state = None
+    polls = 0
+    while True:
+        state = version["attributes"].get("appStoreState", "?")
+        if state != last_state:
+            hint = f" — {STATE_HINTS[state]}" if state in STATE_HINTS else ""
+            log(f"state: {state}{hint}")
+            last_state = state
+        if state in APPROVED_STATES or state in REJECTED_STATES:
+            return version
+        if state == "PREPARE_FOR_SUBMISSION":
+            raise SystemExit(
+                f"Version {version_string!r} has not been submitted for review. "
+                f"Submit it first: asc-submit submit {app_id} --version {version_string}"
+            )
+        polls += 1
+        if polls % 12 == 0:  # liveness heartbeat (hourly at the 5-minute default)
+            log(f"still {state} after {(time.time() - started) / 3600:.1f}h")
+        if deadline is not None and time.time() > deadline:
+            raise SystemExit(
+                f"Timed out waiting for review of {version_string} to resolve "
+                f"(still {state} after {int((time.time() - started) / 60)} minutes). "
+                "Re-run this command to keep waiting."
+            )
+        time.sleep(poll)
+        version = require_version(client, app_id, version_string)

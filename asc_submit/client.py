@@ -7,6 +7,8 @@ urllib while the exact same URL returns 200 in ~0.6s via curl, both over
 HTTP/1.1 and HTTP/2). curl ships with macOS and virtually every Linux
 distribution, so the practical dependency footprint is unchanged — the only
 other external dependency is ``openssl`` for JWT signing.
+
+Full story in docs/forensics.md.
 """
 
 from __future__ import annotations
