@@ -117,10 +117,20 @@ class RunJournal:
             self.finish(STATUS_FAILED, _message(err))
             raise
         else:
-            entry["status"] = STATUS_SUCCESS
+            # cancel_step() overrides the default success outcome
+            entry["status"] = entry.pop("final_status", None) or STATUS_SUCCESS
             entry["finished_at"] = _now()
             entry["log_end"] = self._log_chars
             self._write_state()
+
+    def cancel_step(self, entry: dict) -> None:
+        """End the current step as cancelled when its block exits normally.
+
+        For outcomes that are neither success nor failure — e.g. the user
+        answered no to the submit confirmation.
+        """
+        if isinstance(entry, dict):
+            entry["final_status"] = STATUS_CANCELLED
 
     def log(self, message: str) -> None:
         """Print a line to the terminal and append it to the run's log."""
@@ -171,6 +181,10 @@ class NullJournal:
     @staticmethod
     def step(name: str):
         return contextlib.nullcontext()
+
+    @staticmethod
+    def cancel_step(entry) -> None:
+        pass
 
     @staticmethod
     def log(message: str) -> None:

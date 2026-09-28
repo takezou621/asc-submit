@@ -161,3 +161,23 @@ class NullJournalTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CancelStepTests(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+
+    def test_cancel_step_ends_step_cancelled_not_success(self):
+        jr = j.RunJournal(command="run", title="t", runs_dir=self.dir)
+        jr.start()
+        with jr.step("submit for review") as entry:
+            jr.log("aborted — everything except the submission is done")
+            jr.cancel_step(entry)
+        jr.cancel("submission declined")
+        self.assertEqual(jr.state["steps"][0]["status"], "cancelled")
+        self.assertEqual(jr.state["status"], "cancelled")
+
+    def test_cancel_step_is_noop_for_null_journal(self):
+        null = j.NullJournal()
+        with null.step("x") as entry:
+            null.cancel_step(entry)

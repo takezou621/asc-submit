@@ -102,7 +102,8 @@ def run_spec(
     submit_flag: bool,
     assume_yes: bool,
     journal: RunJournal | NullJournal | None = None,
-) -> None:
+) -> str | None:
+    """Execute the spec; returns "declined" when the submit confirmation got a no."""
     journal = journal or NullJournal()
     version_string = spec["version"]
     with journal.step(f"create/resolve version {version_string}"):
@@ -156,14 +157,16 @@ def run_spec(
             journal.log(f"screenshots for {locale}: {len(files)} uploaded")
 
     if submit_flag or spec.get("submit"):
-        with journal.step("submit for review"):
+        with journal.step("submit for review") as entry:
             if not assume_yes and sys.stdin.isatty():
                 answer = input(f"Submit version {version_string} for App Review? [y/N] ")
                 if answer.strip().lower() not in {"y", "yes"}:
                     journal.log("aborted — everything except the submission is done")
-                    return
+                    journal.cancel_step(entry)
+                    return "declined"
             flows.submit_for_review(client, app_id, version_id)
             journal.log(f"version {version_string} submitted for review")
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -318,14 +321,18 @@ def cmd_run(client: Client | None, args) -> None:
         f"(http://127.0.0.1:8756) or 'asc-submit logs {journal.run_id} --follow'"
     )
     try:
-        run_spec(client, args.app, spec, submit_flag=args.submit, assume_yes=args.yes, journal=journal)
+        outcome = run_spec(client, args.app, spec, submit_flag=args.submit, assume_yes=args.yes, journal=journal)
     except KeyboardInterrupt:
         journal.cancel("interrupted (Ctrl-C)")
         raise
     except BaseException as err:  # SystemExit / ApiError / anything else
         journal.fail(str(err) or type(err).__name__)
         raise
-    journal.succeed()
+    if outcome == "declined":
+        # everything shipped except the submission itself, by explicit choice
+        journal.cancel("submission declined — everything except the submission is done")
+    else:
+        journal.succeed()
 
 
 def cmd_doctor(client: Client, args) -> None:
@@ -525,6 +532,18 @@ def read_text(args) -> str:
 STEP_ICONS = {"success": "✓", "failed": "✕", "running": "●", "cancelled": "⊘"}
 
 
+def _fmt_time(iso: str | None) -> str:
+    """Journal timestamps carry microsecond sort precision; display without it."""
+    if not iso:
+        return ""
+    try:
+        from datetime import datetime
+
+        return datetime.fromisoformat(iso).strftime("%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return iso
+
+
 def cmd_serve(args) -> None:
     """Serve the read-only browser dashboard over the recorded runs."""
     from . import server
@@ -546,9 +565,9 @@ def cmd_runs(args) -> None:
         print(f"{state['title']}  [{state['id']}]")
         print(f"command   {state['command']}")
         print(f"status    {state['status']}")
-        print(f"started   {state['started_at']}")
+        print(f"started   {_fmt_time(state['started_at'])}")
         if state.get("finished_at"):
-            print(f"finished  {state['finished_at']}")
+            print(f"finished  {_fmt_time(state['finished_at'])}")
         if state.get("error"):
             print(f"error     {state['error']}")
         if not state["steps"]:

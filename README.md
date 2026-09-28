@@ -167,6 +167,10 @@ asc-submit runs <id>             # step-by-step detail
 asc-submit logs <id> --follow    # tail a live run from the terminal
 ```
 
+Run states mirror what happened: `success`, `failed` (the red box shows the
+error, and the failing step carries it too), `cancelled` — Ctrl-C, or a submit
+confirmation answered no (everything except the submission itself did ship).
+
 Each `run` / `upload` prints its run id at startup — that id is what you pass
 to the commands above (and what `serve`'s URL looks like:
 `http://127.0.0.1:8756/runs/<id>`).

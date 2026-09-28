@@ -178,6 +178,8 @@ PAGE = r"""<!doctype html>
   .error-box { border: 1px solid var(--red); background: rgba(248,81,73,.08);
                color: #ffb3ad; border-radius: 6px; padding: 10px 12px; margin: 10px 0;
                font-family: var(--mono); font-size: 13px; white-space: pre-wrap; }
+  .error-box.cancelled { border-color: var(--muted); background: rgba(139,148,158,.08);
+                         color: var(--muted); }
 
   /* steps */
   .step { border: 1px solid var(--border); border-radius: 6px; margin-bottom: 8px;
@@ -353,7 +355,7 @@ function renderMain() {
         <span class="badge">started ${agoText(detail.started_at)}</span>
         <span class="badge">${durText(detail.duration_seconds) || "…"}</span>
       </div>
-      ${detail.error ? `<div class="error-box">${esc(detail.error)}</div>` : ""}
+      ${detail.error ? `<div class="error-box ${detail.status}">${esc(detail.error)}</div>` : ""}
       <div id="steps">${steps || '<div class="empty">ステップなし</div>'}</div>
     </div>`;
   el.querySelectorAll(".step-head").forEach((node) =>

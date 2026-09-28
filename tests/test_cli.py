@@ -167,3 +167,61 @@ class RunSpecJournalTests(unittest.TestCase):
         self.assertEqual(state["status"], "failed")
         self.assertEqual(state["steps"][0]["status"], "failed")
         self.assertIn("api down", state["error"])
+
+
+class DeclinedSubmissionTests(unittest.TestCase):
+    """Answering no to the submit prompt records a cancelled run, not success."""
+
+    def setUp(self):
+        import tempfile
+
+        from asc_submit import journal as journal_mod
+
+        self.runs_dir = tempfile.mkdtemp()
+        self.journal_mod = journal_mod
+        client = mock.Mock()
+        client.get_all.return_value = []
+        client.post.return_value = {"data": {"id": "V1", "attributes": {}}}
+        self.client = client
+        fd, self.spec_path = tempfile.mkstemp(suffix=".json")
+        Path(self.spec_path).write_text(json.dumps({"version": "1.0.0"}))
+
+    def tearDown(self):
+        Path(self.spec_path).unlink()
+
+    def test_run_spec_returns_declined_and_cancels_the_step(self):
+        jr = self.journal_mod.RunJournal(command="run", title="t", runs_dir=self.runs_dir)
+        jr.start()
+        stdin = mock.Mock(isatty=lambda: True)
+        with mock.patch("sys.stdin", stdin), mock.patch("builtins.input", return_value="n"):
+            outcome = cli.run_spec(self.client, "6812783176", {"version": "1.0.0"}, True, False, jr)
+        self.assertEqual(outcome, "declined")
+        self.assertEqual(jr.state["steps"][-1]["name"], "submit for review")
+        self.assertEqual(jr.state["steps"][-1]["status"], "cancelled")
+
+    def test_cmd_run_marks_the_run_cancelled_on_decline(self):
+        args = mock.Mock()
+        args.spec = self.spec_path
+        args.app = "6812783176"
+        args.dry_run = False
+        args.submit = False
+        args.yes = True
+        args.runs_dir = self.runs_dir
+        with mock.patch.object(cli, "run_spec", return_value="declined"):
+            with mock.patch("sys.stdout", new_callable=io.StringIO):
+                cli.cmd_run(object(), args)
+        state = self.journal_mod.list_runs(self.runs_dir)[0]
+        self.assertEqual(state["status"], "cancelled")
+        self.assertIn("declined", state["error"])
+
+
+class FormatTimeTests(unittest.TestCase):
+    def test_microseconds_and_offset_are_dropped(self):
+        self.assertEqual(
+            cli._fmt_time("2026-09-28T14:53:23.044409+09:00"),
+            "2026-09-28 14:53:23",
+        )
+
+    def test_none_and_garbage(self):
+        self.assertEqual(cli._fmt_time(None), "")
+        self.assertEqual(cli._fmt_time("not a date"), "not a date")
