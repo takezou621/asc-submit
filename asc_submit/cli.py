@@ -17,6 +17,16 @@ from pathlib import Path
 
 from . import auth, flows
 from .client import ApiError, Client
+from .journal import (
+    DEFAULT_RUNS_DIR,
+    RUNS_DIR_ENV,
+    NullJournal,
+    RunJournal,
+    list_runs,
+    read_log,
+    read_run,
+    resolve_runs_dir,
+)
 
 ENV_KEY_PATH = "ASC_KEY_PATH"
 ENV_KEY_ID = "ASC_KEY_ID"
@@ -85,57 +95,78 @@ def spec_plan(spec: dict) -> list[str]:
     return plan
 
 
-def run_spec(client: Client, app_id: str, spec: dict, submit_flag: bool, assume_yes: bool) -> None:
+def run_spec(
+    client: Client,
+    app_id: str,
+    spec: dict,
+    submit_flag: bool,
+    assume_yes: bool,
+    journal: RunJournal | NullJournal | None = None,
+) -> str | None:
+    """Execute the spec; returns "declined" when the submit confirmation got a no."""
+    journal = journal or NullJournal()
     version_string = spec["version"]
-    version = flows.create_version(
-        client, app_id, version_string, spec.get("releaseType", "AFTER_APPROVAL"), spec.get("platform", flows.MACOS_PLATFORM)
-    )
-    version_id = version["id"]
+    with journal.step(f"create/resolve version {version_string}"):
+        version = flows.create_version(
+            client, app_id, version_string, spec.get("releaseType", "AFTER_APPROVAL"), spec.get("platform", flows.MACOS_PLATFORM)
+        )
+        version_id = version["id"]
+        journal.log(f"version {version_string} ready ({version_id}, {version['attributes'].get('appStoreState', '?')})")
 
     build = spec.get("build")
     if build:
-        state = flows.find_build(client, app_id, build)
-        if not state or state["attributes"].get("processingState") != "VALID":
-            print(f"waiting for build {build} to become VALID …")
-            flows.wait_for_build(client, app_id, build)
-        flows.attach_build(client, version_id, app_id, build)
-        print(f"build {build} attached")
+        with journal.step(f"attach build {build}"):
+            state = flows.find_build(client, app_id, build)
+            if not state or state["attributes"].get("processingState") != "VALID":
+                journal.log(f"waiting for build {build} to become VALID …")
+                flows.wait_for_build(client, app_id, build, log=journal.log)
+            flows.attach_build(client, version_id, app_id, build)
+            journal.log(f"build {build} attached")
 
-    flows.set_localizations(client, version_id, spec.get("whatsNew"), spec.get("descriptions"), spec.get("keywords"))
     if spec.get("whatsNew") or spec.get("descriptions") or spec.get("keywords"):
-        print("localizations updated")
+        locales = sorted(set(spec.get("whatsNew") or {}) | set(spec.get("descriptions") or {}) | set(spec.get("keywords") or {}))
+        with journal.step(f"update localizations ({', '.join(locales)})"):
+            flows.set_localizations(client, version_id, spec.get("whatsNew"), spec.get("descriptions"), spec.get("keywords"))
+            journal.log("localizations updated")
 
     # Subtitles are app-level and need the just-created version's appInfo in an
     # editable state — which create_version above just ensured — so this comes
     # after it, not before.
     if spec.get("subtitles"):
-        flows.set_subtitles(client, app_id, spec["subtitles"])
-        print("subtitles updated")
+        with journal.step(f"set subtitles ({', '.join(sorted(spec['subtitles']))}, app-level)"):
+            flows.set_subtitles(client, app_id, spec["subtitles"])
+            journal.log("subtitles updated")
 
     if spec.get("reviewNotes"):
-        flows.set_review_notes(client, version_id, spec["reviewNotes"])
-        print("review notes updated")
+        with journal.step("update App Review notes"):
+            flows.set_review_notes(client, version_id, spec["reviewNotes"])
+            journal.log("review notes updated")
 
     display_type = spec.get("screenshotDisplayType", "APP_DESKTOP")
     for locale, files in (spec.get("screenshots") or {}).items():
-        flows.set_screenshots(
-            client,
-            version_id,
-            locale,
-            files,
-            display_type=display_type,
-            replace=bool(spec.get("screenshotsReplace")),
-        )
-        print(f"screenshots for {locale}: {len(files)} uploaded")
+        with journal.step(f"screenshots {locale} ({len(files)} file{'s' if len(files) != 1 else ''})"):
+            flows.set_screenshots(
+                client,
+                version_id,
+                locale,
+                files,
+                display_type=display_type,
+                replace=bool(spec.get("screenshotsReplace")),
+                log=journal.log,
+            )
+            journal.log(f"screenshots for {locale}: {len(files)} uploaded")
 
     if submit_flag or spec.get("submit"):
-        if not assume_yes and sys.stdin.isatty():
-            answer = input(f"Submit version {version_string} for App Review? [y/N] ")
-            if answer.strip().lower() not in {"y", "yes"}:
-                print("aborted — everything except the submission is done")
-                return
-        flows.submit_for_review(client, app_id, version_id)
-        print(f"version {version_string} submitted for review")
+        with journal.step("submit for review") as entry:
+            if not assume_yes and sys.stdin.isatty():
+                answer = input(f"Submit version {version_string} for App Review? [y/N] ")
+                if answer.strip().lower() not in {"y", "yes"}:
+                    journal.log("aborted — everything except the submission is done")
+                    journal.cancel_step(entry)
+                    return "declined"
+            flows.submit_for_review(client, app_id, version_id)
+            journal.log(f"version {version_string} submitted for review")
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -272,7 +303,36 @@ def cmd_run(client: Client | None, args) -> None:
             print(f"  - {line}")
         return
     assert client is not None  # main() guarantees a client outside --dry-run
-    run_spec(client, args.app, spec, submit_flag=args.submit, assume_yes=args.yes)
+    journal = RunJournal(
+        command="run",
+        title=f"{args.app} → {spec['version']}",
+        meta={
+            "app": args.app,
+            "version": spec["version"],
+            "build": spec.get("build"),
+            "spec": Path(args.spec).name,
+            "platform": spec.get("platform", flows.MACOS_PLATFORM),
+        },
+        runs_dir=getattr(args, "runs_dir", None),
+    )
+    journal.start()
+    journal.log(
+        f"run {journal.run_id} — follow live with 'asc-submit serve' "
+        f"(http://127.0.0.1:8756) or 'asc-submit logs {journal.run_id} --follow'"
+    )
+    try:
+        outcome = run_spec(client, args.app, spec, submit_flag=args.submit, assume_yes=args.yes, journal=journal)
+    except KeyboardInterrupt:
+        journal.cancel("interrupted (Ctrl-C)")
+        raise
+    except BaseException as err:  # SystemExit / ApiError / anything else
+        journal.fail(str(err) or type(err).__name__)
+        raise
+    if outcome == "declined":
+        # everything shipped except the submission itself, by explicit choice
+        journal.cancel("submission declined — everything except the submission is done")
+    else:
+        journal.succeed()
 
 
 def cmd_doctor(client: Client, args) -> None:
@@ -354,60 +414,103 @@ def cmd_upload(args) -> None:
     work_dir = Path(args.work_dir).resolve()
     work_dir.mkdir(parents=True, exist_ok=True)
 
-    if args.from_archive:
-        archive_path = Path(args.from_archive).resolve()
-        if not archive_path.is_dir():
-            raise SystemExit(f"archive not found: {archive_path}")
-    else:
+    if not args.from_archive:
         if not args.project and not args.workspace:
             raise SystemExit("--project or --workspace is required (or --from-archive)")
         if args.project and args.workspace:
             raise SystemExit("--project and --workspace are mutually exclusive")
-        archive_path = work_dir / f"{args.scheme}.xcarchive"
-        cmd = xcode.build_archive_command(
-            scheme=args.scheme,
-            configuration=args.configuration,
-            platform=args.platform,
-            version=args.version,
-            build=args.build,
-            derived_data=work_dir / "derived",
-            archive_path=archive_path,
-            project=args.project,
-            workspace=args.workspace,
-            team_id=args.team_id,
-        )
-        print("archiving …")
-        xcode.run_xcodebuild(cmd, quiet=not args.verbose)
 
-    app = xcode.find_app_in_archive(archive_path)
-    if not args.skip_version_check:
-        short, bundle_build = xcode.read_bundle_versions(app)
-        mismatches = []
-        if short != args.version:
-            mismatches.append(f"CFBundleShortVersionString={short} (expected {args.version})")
-        if bundle_build != args.build:
-            mismatches.append(f"CFBundleVersion={bundle_build} (expected {args.build})")
-        if mismatches:
-            raise SystemExit(
-                "archived bundle version mismatch: " + "; ".join(mismatches)
-                + ". The project probably hard-codes its Info.plist values instead of "
-                "using MARKETING_VERSION/CURRENT_PROJECT_VERSION build settings."
+    journal = RunJournal(
+        command="upload",
+        title=f"upload {args.scheme} {args.version} ({args.build})",
+        meta={
+            "scheme": args.scheme,
+            "version": args.version,
+            "build": args.build,
+            "platform": args.platform,
+            "project": args.project or args.workspace,
+        },
+        runs_dir=getattr(args, "runs_dir", None),
+    )
+    journal.start()
+    journal.log(
+        f"run {journal.run_id} — follow live with 'asc-submit serve' "
+        f"(http://127.0.0.1:8756) or 'asc-submit logs {journal.run_id} --follow'"
+    )
+    try:
+        _upload_workflow(args, work_dir, journal)
+    except KeyboardInterrupt:
+        journal.cancel("interrupted (Ctrl-C)")
+        raise
+    except BaseException as err:
+        journal.fail(str(err) or type(err).__name__)
+        raise
+    journal.succeed()
+
+
+def _upload_workflow(args, work_dir: Path, journal: RunJournal | NullJournal) -> None:
+    """The upload phases, recorded step by step on ``journal``."""
+    from . import xcode
+
+    if args.from_archive:
+        with journal.step(f"locate archive ({args.from_archive})"):
+            archive_path = Path(args.from_archive).resolve()
+            if not archive_path.is_dir():
+                raise SystemExit(f"archive not found: {archive_path}")
+            journal.log(f"using existing archive: {archive_path}")
+    else:
+        with journal.step(f"archive {args.scheme} ({args.configuration}, {args.platform})"):
+            archive_path = work_dir / f"{args.scheme}.xcarchive"
+            cmd = xcode.build_archive_command(
+                scheme=args.scheme,
+                configuration=args.configuration,
+                platform=args.platform,
+                version=args.version,
+                build=args.build,
+                derived_data=work_dir / "derived",
+                archive_path=archive_path,
+                project=args.project,
+                workspace=args.workspace,
+                team_id=args.team_id,
             )
-        print(f"archived bundle verified: {app.name} {short} ({bundle_build})")
+            journal.log(f"xcodebuild archive → {archive_path}")
+            xcode.run_xcodebuild(cmd, quiet=not args.verbose, log=journal.log)
+
+    with journal.step("verify archived bundle"):
+        app = xcode.find_app_in_archive(archive_path)
+        if not args.skip_version_check:
+            short, bundle_build = xcode.read_bundle_versions(app)
+            mismatches = []
+            if short != args.version:
+                mismatches.append(f"CFBundleShortVersionString={short} (expected {args.version})")
+            if bundle_build != args.build:
+                mismatches.append(f"CFBundleVersion={bundle_build} (expected {args.build})")
+            if mismatches:
+                raise SystemExit(
+                    "archived bundle version mismatch: " + "; ".join(mismatches)
+                    + ". The project probably hard-codes its Info.plist values instead of "
+                    "using MARKETING_VERSION/CURRENT_PROJECT_VERSION build settings."
+                )
+            journal.log(f"archived bundle verified: {app.name} {short} ({bundle_build})")
+        else:
+            journal.log("version check skipped (--skip-version-check)")
 
     if args.archive_only:
-        print(f"archive-only: {archive_path}")
+        journal.log(f"archive-only: {archive_path}")
         return
 
-    options_plist = work_dir / "exportOptions.plist"
-    xcode.write_export_options(options_plist, args.team_id)
-    print("uploading to App Store Connect …")
-    xcode.run_xcodebuild(
-        xcode.build_export_command(archive_path, work_dir / "export", options_plist),
-        quiet=not args.verbose,
-    )
-    print(
-        "upload finished. Wait for the build to reach VALID in App Store Connect "
+    with journal.step("upload to App Store Connect"):
+        options_plist = work_dir / "exportOptions.plist"
+        xcode.write_export_options(options_plist, args.team_id)
+        journal.log("exportArchive (destination=upload) started")
+        xcode.run_xcodebuild(
+            xcode.build_export_command(archive_path, work_dir / "export", options_plist),
+            quiet=not args.verbose,
+            log=journal.log,
+        )
+        journal.log("upload finished")
+    journal.log(
+        "Wait for the build to reach VALID in App Store Connect "
         "(asc-submit run will wait for you), then submit."
     )
 
@@ -420,6 +523,96 @@ def read_text(args) -> str:
     if args.file is not None:
         return Path(args.file).read_text(encoding="utf-8")
     raise SystemExit("provide --text or --file")
+
+
+# ---------------------------------------------------------------------------
+# workflow history (runs / logs / serve) — journal readers, no API key
+
+
+STEP_ICONS = {"success": "✓", "failed": "✕", "running": "●", "cancelled": "⊘"}
+
+
+def _fmt_time(iso: str | None) -> str:
+    """Journal timestamps carry microsecond sort precision; display without it."""
+    if not iso:
+        return ""
+    try:
+        from datetime import datetime
+
+        return datetime.fromisoformat(iso).strftime("%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return iso
+
+
+def cmd_serve(args) -> None:
+    """Serve the read-only browser dashboard over the recorded runs."""
+    from . import server
+
+    server.serve(
+        runs_dir=getattr(args, "runs_dir", None),
+        host=args.host,
+        port=args.port,
+        open_browser=args.open,
+    )
+
+
+def cmd_runs(args) -> None:
+    root = resolve_runs_dir(getattr(args, "runs_dir", None))
+    if args.id:
+        state = read_run(args.id, root)
+        if state is None:
+            raise SystemExit(f"no run '{args.id}' under {root}")
+        print(f"{state['title']}  [{state['id']}]")
+        print(f"command   {state['command']}")
+        print(f"status    {state['status']}")
+        print(f"started   {_fmt_time(state['started_at'])}")
+        if state.get("finished_at"):
+            print(f"finished  {_fmt_time(state['finished_at'])}")
+        if state.get("error"):
+            print(f"error     {state['error']}")
+        if not state["steps"]:
+            print("no steps recorded")
+            return
+        for step in state["steps"]:
+            icon = STEP_ICONS.get(step["status"], "○")
+            suffix = f" — {step['error']}" if step.get("error") else ""
+            print(f"  [{icon}] {step['name']}{suffix}")
+        print(f"logs: asc-submit logs {state['id']}")
+        return
+    runs = list_runs(root)
+    if not runs:
+        print(f"no workflow runs recorded under {root}")
+        print("runs are recorded by 'asc-submit run' and 'asc-submit upload'")
+        return
+    print(f"{'run id':<22} {'status':<10} {'command':<8} title")
+    for run in runs:
+        print(f"{run['id']:<22} {run['status']:<10} {run['command']:<8} {run.get('title', '')}")
+    print(f"\n{len(runs)} run(s) · detail: asc-submit runs <id> · logs: asc-submit logs <id>")
+
+
+def cmd_logs(args) -> None:
+    root = resolve_runs_dir(getattr(args, "runs_dir", None))
+    state = read_run(args.id, root)
+    if state is None:
+        raise SystemExit(f"no run '{args.id}' under {root}")
+    text, offset, _size = read_log(args.id, root)
+    sys.stdout.write(text)
+    sys.stdout.flush()
+    if not args.follow:
+        return
+    import time
+
+    # tail -f: stream new characters until the run finishes and the log is drained
+    while True:
+        finished = state.get("finished_at") is not None
+        text, offset, size = read_log(args.id, root, start=offset)
+        if text:
+            sys.stdout.write(text)
+            sys.stdout.flush()
+        if finished and offset >= size:
+            return
+        time.sleep(args.interval)
+        state = read_run(args.id, root) or state
 
 
 # ---------------------------------------------------------------------------
@@ -537,6 +730,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--archive-only", action="store_true", help="stop after archiving (no upload)")
     p.add_argument("--from-archive", help="skip archiving; upload an existing .xcarchive")
     p.add_argument("--skip-version-check", action="store_true", help="do not compare the archived bundle version")
+    p.add_argument("--runs-dir", help=f"where to record this run (env: {RUNS_DIR_ENV}; default {DEFAULT_RUNS_DIR})")
     p.add_argument("-v", "--verbose", action="store_true", help="print full xcodebuild output")
     p.set_defaults(func=cmd_upload)
 
@@ -546,7 +740,28 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--submit", action="store_true", help="submit for review at the end")
     p.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
     p.add_argument("--dry-run", action="store_true", help="print the plan without touching anything")
+    p.add_argument("--runs-dir", help=f"where to record this run (env: {RUNS_DIR_ENV}; default {DEFAULT_RUNS_DIR})")
     p.set_defaults(func=cmd_run)
+
+    # serve / runs / logs read the run journal — no API key, no side effects.
+    p = sub.add_parser("serve", help="live browser view of workflow runs (read-only)")
+    p.add_argument("--host", default="127.0.0.1", help="bind address (default 127.0.0.1)")
+    p.add_argument("--port", type=int, default=8756, help="port (default 8756)")
+    p.add_argument("--runs-dir", help=f"runs dir to watch (env: {RUNS_DIR_ENV}; default {DEFAULT_RUNS_DIR})")
+    p.add_argument("--open", action="store_true", help="open the dashboard in your default browser")
+    p.set_defaults(func=cmd_serve)
+
+    p = sub.add_parser("runs", help="list recorded workflow runs, or show one run's steps")
+    p.add_argument("id", nargs="?", help="run id (from the list, or the run's start banner)")
+    p.add_argument("--runs-dir", help=f"env: {RUNS_DIR_ENV}; default {DEFAULT_RUNS_DIR}")
+    p.set_defaults(func=cmd_runs)
+
+    p = sub.add_parser("logs", help="print a run's recorded log (like tail -f with --follow)")
+    p.add_argument("id", help="run id")
+    p.add_argument("--follow", "-f", action="store_true", help="keep streaming until the run finishes")
+    p.add_argument("--interval", type=float, default=1.0, help="poll interval in seconds (default 1.0)")
+    p.add_argument("--runs-dir", help=f"env: {RUNS_DIR_ENV}; default {DEFAULT_RUNS_DIR}")
+    p.set_defaults(func=cmd_logs)
 
     return parser
 
@@ -555,8 +770,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
-        if args.command == "upload":
-            # xcodebuild path: no API key required.
+        if args.command in {"upload", "serve", "runs", "logs"}:
+            # xcodebuild path and journal readers: no API key required.
             args.func(args)
             return 0
         if args.command == "run" and args.dry_run:
