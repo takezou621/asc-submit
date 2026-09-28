@@ -1,0 +1,34 @@
+.gitignore
+  h_864205080385bc 13
+README.md
+  h_864205080385bc 139-173,205-206
+asc_submit/__init__.py
+  h_864205080385bc 3
+asc_submit/cli.py
+  h_864205080385bc 20-29,98-106,108-113,117-124,126-129,135-137,140-142,146-156,159-166,303-328,410,415-467,469-489,492,495-506,521-598,714,724,727-746,754-755
+asc_submit/journal.py
+  h_864205080385bc 1-264
+asc_submit/server.py
+  h_864205080385bc 1-383
+asc_submit/xcode.py
+  h_864205080385bc 143-148,156
+pyproject.toml
+  h_864205080385bc 7
+tests/test_cli.py
+  h_864205080385bc 85-169
+tests/test_journal.py
+  h_864205080385bc 1-163
+tests/test_server.py
+  h_864205080385bc 1-120
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "88f6fdc46a2c5c65587307c024ee512e6af0e97a",
+  "prompts": {},
+  "humans": {
+    "h_864205080385bc": {
+      "author": "takezou621 <takezou621@gmail.com>"
+    }
+  }
+}
