@@ -10,3 +10,4 @@ venv/
 .coverage
 *.p8
 *.p12
+.asc-submit/

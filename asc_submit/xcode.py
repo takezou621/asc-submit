@@ -140,8 +140,12 @@ def read_bundle_versions(app_path: Path) -> tuple[str, str]:
     return str(short), str(build)
 
 
-def run_xcodebuild(cmd: list[str], quiet: bool = False) -> None:
-    """Run xcodebuild and stream its output; raise on failure."""
+def run_xcodebuild(cmd: list[str], quiet: bool = False, log=print) -> None:
+    """Run xcodebuild and hand its output to ``log``; raise on failure.
+
+    ``log`` defaults to plain ``print`` so interactive use is unchanged; the
+    upload workflow passes its journal so the tail lands in the run record.
+    """
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
         raise XcodeError(
@@ -149,4 +153,4 @@ def run_xcodebuild(cmd: list[str], quiet: bool = False) -> None:
             f"{proc.stdout[-3000:]}\n{proc.stderr[-2000:]}"
         )
     if not quiet:
-        print(proc.stdout[-2000:])
+        log(proc.stdout[-2000:])

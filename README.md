@@ -136,6 +136,41 @@ set subtitles → replace screenshots → submit for review.
 Drop `--submit` to do everything but the submission (e.g. let a human press the
 final button).
 
+## Watching a run in real time
+
+`run` and `upload` record every step as they execute — status, timing and log
+text — under `.asc-submit/runs/<run-id>/` (`state.json` + `output.log`; move it
+with `--runs-dir` or `$ASC_SUBMIT_RUNS_DIR`). The files are the interface:
+there is no daemon and no database, and every viewer reads the same data.
+
+Browser dashboard, GitHub-Actions style (steps, durations, live logs):
+
+```sh
+asc-submit serve                 # http://127.0.0.1:8756 — add --open to launch it
+```
+
+The dashboard is read-only: workflows start from the CLI as always, the
+browser only watches. It binds `127.0.0.1` and serves the same data as JSON,
+so scripts work too:
+
+| endpoint                   | returns                                |
+| -------------------------- | -------------------------------------- |
+| `GET /api/runs`            | run summaries, newest first            |
+| `GET /api/runs/<id>`       | one run: status, timing, steps         |
+| `GET /api/runs/<id>/log`   | log slice, `?from=N[&to=M]` char range |
+
+The same journal is reachable without a browser:
+
+```sh
+asc-submit runs                  # list recorded runs
+asc-submit runs <id>             # step-by-step detail
+asc-submit logs <id> --follow    # tail a live run from the terminal
+```
+
+Each `run` / `upload` prints its run id at startup — that id is what you pass
+to the commands above (and what `serve`'s URL looks like:
+`http://127.0.0.1:8756/runs/<id>`).
+
 ### Keywords and subtitles
 
 - **Keywords** travel with a version (`appStoreVersionLocalizations`), like
@@ -167,6 +202,8 @@ asc-submit screenshots 6812783176 --version 0.7.0 --locale ja --replace shot-01.
 asc-submit attach-build 6812783176 --version 0.7.0 --build 8 --wait
 asc-submit submit 6812783176 --version 0.7.0
 asc-submit cancel-submission 6812783176 --version 0.7.0
+asc-submit serve                                   # live browser view of runs
+asc-submit runs / runs <id> / logs <id> --follow   # journal from the terminal
 ```
 
 `<app>` accepts the Apple ID (a number) or the bundle ID.
