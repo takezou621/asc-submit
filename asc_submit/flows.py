@@ -422,7 +422,7 @@ def enable_phased_release(client: Client, version_id: str) -> None:
     if get_phased_release(client, version_id) is not None:
         return
     client.post(
-        "/v1/appStoreVersionPhasedRelease",
+        "/v1/appStoreVersionPhasedReleases",
         {
             "data": {
                 "type": "appStoreVersionPhasedRelease",
@@ -438,7 +438,7 @@ def disable_phased_release(client: Client, version_id: str) -> None:
     """Turn off phased release: everyone gets the update at once (idempotent)."""
     phased = get_phased_release(client, version_id)
     if phased is not None:
-        client.delete(f"/v1/appStoreVersionPhasedRelease/{phased['id']}")
+        client.delete(f"/v1/appStoreVersionPhasedReleases/{phased['id']}")
 
 
 def parse_release_date(when: str) -> datetime:

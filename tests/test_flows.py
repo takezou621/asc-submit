@@ -332,7 +332,7 @@ class ReleaseControlsTests(unittest.TestCase):
         client = self._client(phased=None)
         flows.enable_phased_release(client, "V")
         path, body = client.posted[0]
-        self.assertEqual(path, "/v1/appStoreVersionPhasedRelease")
+        self.assertEqual(path, "/v1/appStoreVersionPhasedReleases")
         self.assertEqual(
             body["data"]["relationships"]["appStoreVersion"]["data"],
             {"type": "appStoreVersions", "id": "V"},
@@ -347,7 +347,7 @@ class ReleaseControlsTests(unittest.TestCase):
         client = self._client(phased={"id": "PR1", "attributes": {"state": "ACTIVE"}})
         flows.disable_phased_release(client, "V")
         (path,) = client.delete.call_args[0]
-        self.assertEqual(path, "/v1/appStoreVersionPhasedRelease/PR1")
+        self.assertEqual(path, "/v1/appStoreVersionPhasedReleases/PR1")
 
     def test_disable_without_resource_is_a_noop(self):
         client = self._client(phased=None)
