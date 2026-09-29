@@ -425,7 +425,7 @@ def enable_phased_release(client: Client, version_id: str) -> None:
         "/v1/appStoreVersionPhasedReleases",
         {
             "data": {
-                "type": "appStoreVersionPhasedRelease",
+                "type": "appStoreVersionPhasedReleases",
                 "relationships": {
                     "appStoreVersion": {"data": {"type": "appStoreVersions", "id": version_id}}
                 },
