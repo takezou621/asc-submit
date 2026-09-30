@@ -2,6 +2,7 @@ import unittest
 from unittest import mock
 
 from asc_submit import flows
+from asc_submit.client import ApiError
 
 
 def localization(loc_id, locale, **attrs):
@@ -153,6 +154,72 @@ class SubmitForReviewTests(unittest.TestCase):
         path, body = client.patch.call_args[0]
         self.assertEqual(path, "/v1/reviewSubmissions/SUB1")
         self.assertEqual(body["data"]["attributes"], {"submitted": True})
+
+    def test_creates_submission_with_explicit_platform(self):
+        client = self._client()
+        posts = []
+
+        def fake_post(path, body):
+            posts.append((path, body))
+            if path == "/v1/reviewSubmissions":
+                return {"data": {"id": "SUB1", "attributes": {"state": "DRAFT"}}}
+            return {"data": {"id": "ITEM1"}}
+
+        client.post = mock.Mock(side_effect=fake_post)
+        flows.submit_for_review(client, "APP", "V", platform="IOS")
+        self.assertEqual(posts[0][1]["data"]["attributes"], {"platform": "IOS"})
+
+    def test_item_409_with_associated_errors_surfaces_them(self):
+        # eyechecker 2.0 (2026-09-30): the item attach answered 409 with the
+        # real blockers (unanswered age-rating attributes) in
+        # meta.associatedErrors — swallowing it printed "already has a pending
+        # submission" and looked like success.
+        client = self._client()
+
+        def fake_post(path, body):
+            if path == "/v1/reviewSubmissionItems":
+                raise ApiError(
+                    409,
+                    [
+                        {
+                            "title": "This resource cannot be reviewed",
+                            "detail": "generic",
+                            "meta": {
+                                "associatedErrors": {
+                                    "/v1/ageRatingDeclarations/V": [
+                                        {"detail": "You must provide a value for 'advertising'"},
+                                        {"detail": "You must provide a value for 'lootBox'"},
+                                    ]
+                                }
+                            },
+                        }
+                    ],
+                )
+            return {"data": {"id": "SUB1", "attributes": {"state": "DRAFT"}}}
+
+        client.post = mock.Mock(side_effect=fake_post)
+        with self.assertRaises(SystemExit) as ctx:
+            flows.submit_for_review(client, "APP", "V")
+        self.assertIn("advertising", str(ctx.exception))
+        self.assertIn("lootBox", str(ctx.exception))
+
+    def test_item_409_without_associated_errors_is_a_retry(self):
+        client = self._client()
+        state = {"n": 0}
+
+        def fake_post(path, body):
+            state["n"] += 1
+            if path == "/v1/reviewSubmissionItems":
+                if state["n"] == 1:
+                    raise ApiError(409, [{"title": "conflict"}])
+                return {"data": {"id": "ITEM1"}}
+            return {"data": {"id": "SUB1", "attributes": {"state": "DRAFT"}}}
+
+        client.post = mock.Mock(side_effect=fake_post)
+        client.patch = mock.Mock(return_value={})
+        flows.submit_for_review(client, "APP", "V")  # must not raise
+        path, _ = client.patch.call_args[0]
+        self.assertEqual(path, "/v1/reviewSubmissions/SUB1")
 
     def test_existing_submission_is_reused(self):
         client = self._client(existing=[{"id": "SUB9", "attributes": {"state": "READY_FOR_REVIEW"}}])
