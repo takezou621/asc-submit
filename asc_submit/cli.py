@@ -397,7 +397,9 @@ def run_spec(
                     journal.log("aborted — everything except the submission is done")
                     journal.cancel_step(entry)
                     return "declined"
-            flows.submit_for_review(client, app_id, version_id)
+            flows.submit_for_review(
+                client, app_id, version_id, platform=spec.get("platform", flows.MACOS_PLATFORM)
+            )
             journal.log(f"version {version_string} submitted for review")
     return None
 
@@ -581,7 +583,13 @@ def cmd_submit(client: Client, args) -> None:
         if answer.strip().lower() not in {"y", "yes"}:
             raise SystemExit("aborted")
     app_id = flows.find_app(client, args.app)["id"]
-    flows.submit_for_review(client, app_id, version["id"])
+    # reviewSubmissions are created per platform. The submission must match the
+    # *version's* platform — submit_for_review's MAC_OS default was fine when
+    # only kilde (macOS) used it, but submitting an iOS app created an empty
+    # MAC_OS submission and failed on the item attach (eyechecker 2.0,
+    # 2026-09-30). resolve_version always fetches attributes.platform.
+    platform = version["attributes"]["platform"]
+    flows.submit_for_review(client, app_id, version["id"], platform=platform)
     print(f"version {args.version} submitted for review")
 
 

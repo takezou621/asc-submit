@@ -607,6 +607,26 @@ def _open_review_submission(client: Client, version_id: str) -> dict | None:
     return subs[0] if subs else None
 
 
+def _associated_details(err: ApiError) -> list[str]:
+    """Human-readable details from an ASC "associatedErrors" rejection.
+
+    A 409/422 on reviewSubmissionItems / reviewSubmissions carries the real
+    blocker (missing age-rating answers, invalid state, ...) in
+    ``meta.associatedErrors``. Without this the caller only sees the generic
+    "This resource cannot be reviewed" title (eyechecker 2.0 submission,
+    2026-09-30: eight unanswered 2025 age-rating attributes hid behind it).
+    """
+    details: list[str] = []
+    for error in err.errors:
+        associated = (error.get("meta") or {}).get("associatedErrors") or {}
+        for errs in associated.values():
+            for item in errs:
+                detail = (item.get("detail") or item.get("title") or "").strip()
+                if detail:
+                    details.append(detail)
+    return details
+
+
 def submit_for_review(client: Client, app_id: str, version_id: str, platform: str = MACOS_PLATFORM) -> None:
     """Submit the version for App Review via the reviewSubmissions API.
 
@@ -645,7 +665,9 @@ def submit_for_review(client: Client, app_id: str, version_id: str, platform: st
 
     # Attach the version as the item under review. A 409 here means the item
     # already exists (retry after a partial failure) — that is fine, the
-    # submission PATCH below is what matters.
+    # submission PATCH below is what matters. But a 409 carrying
+    # associatedErrors is a real rejection (e.g. the version fails ASC's
+    # submit-time validation) and must surface, not look like success.
     try:
         client.post(
             "/v1/reviewSubmissionItems",
@@ -666,6 +688,11 @@ def submit_for_review(client: Client, app_id: str, version_id: str, platform: st
     except ApiError as err:
         if err.status not in {409, 422}:
             raise
+        details = _associated_details(err)
+        if details:
+            raise SystemExit(
+                "ASC rejected this version for review:\n  - " + "\n  - ".join(details)
+            ) from err
 
     try:
         client.patch(
@@ -680,6 +707,11 @@ def submit_for_review(client: Client, app_id: str, version_id: str, platform: st
         )
     except ApiError as err:
         if err.status in {409, 422}:
+            details = _associated_details(err)
+            if details:
+                raise SystemExit(
+                    "ASC rejected this submission:\n  - " + "\n  - ".join(details)
+                ) from err
             print("Version already has a pending submission; nothing to do.", file=sys.stderr)
             return
         raise
