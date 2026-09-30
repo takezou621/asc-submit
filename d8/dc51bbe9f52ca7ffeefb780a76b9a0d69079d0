@@ -1,0 +1,23 @@
+asc_submit/cli.py
+  s_64b2d4ab05dbfe::t_c08b6c00c4e653 400-402,586-592
+asc_submit/flows.py
+  s_64b2d4ab05dbfe::t_c3f9dba9eb9bf3 610-629,668-670,691-695,710-714
+tests/test_flows.py
+  s_64b2d4ab05dbfe::t_b724c5a3fbfa53 5,158-223
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d8dc51bbe9f52ca7ffeefb780a76b9a0d69079d0",
+  "prompts": {},
+  "sessions": {
+    "s_64b2d4ab05dbfe": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0efac-5bfb-7b22-b8c3-9cb83976504a",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "takezou621 <takezou621@gmail.com>"
+    }
+  }
+}
