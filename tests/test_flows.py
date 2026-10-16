@@ -18,6 +18,8 @@ class FakeClient(mock.Mock):
         self._app_infos = list(app_infos)
         # app_info_id -> localizations
         self._app_info_localizations = app_info_localizations or {}
+        # submit_for_review の app レベル reviewSubmissions 一覧 (空 = 未提出なし)
+        self._app_submissions = []
         self.patched = []
         self.posted = []
         self.get_all = mock.Mock(side_effect=self._get_all)
@@ -32,6 +34,8 @@ class FakeClient(mock.Mock):
             return self._version_localizations
         if path == "/v1/apps/APP/appStoreVersions":
             return []  # create_version resolves first; empty = does not exist yet
+        if path == "/v1/apps/APP/reviewSubmissions":
+            return self._app_submissions
         if path == "/v1/apps/APP/appInfos":
             return self._app_infos
         if "/appInfoLocalizations" in path:
@@ -122,8 +126,9 @@ class SubmitForReviewTests(unittest.TestCase):
     """The reviewSubmissions flow (the legacy appStoreVersionSubmissions POST
     is deprecated: 403 "Allowed operation is: DELETE" — kilde run 36284583404)."""
 
-    def _client(self, existing=None):
+    def _client(self, existing=None, app_submissions=()):
         client = FakeClient()
+        client._app_submissions = list(app_submissions)
         # GET reviewSubmissions for the version → existing (or 404-equivalent [])
         client.get = mock.Mock(return_value={"data": existing or []})
         return client
@@ -229,6 +234,73 @@ class SubmitForReviewTests(unittest.TestCase):
         self.assertEqual(create_calls, [])
         path, _ = client.patch.call_args[0]
         self.assertEqual(path, "/v1/reviewSubmissions/SUB9")
+
+    def test_single_unsubmitted_submission_is_reused(self):
+        # eyechecker 2.9 (2026-10-15): a retried submit (item attach answering
+        # 409 "Asset upload is in progress") stacked empty submissions because
+        # only the version-linked submission is reused; ASC then rejected
+        # every later CREATE/PATCH with a bare 409. A lone unsubmitted
+        # submission must be reused, not duplicated.
+        client = self._client(
+            app_submissions=[{"id": "SUB9", "attributes": {"platform": "MAC_OS", "submitted": False}}]
+        )
+        posts = []
+
+        def fake_post(path, body):
+            posts.append((path, body))
+            return {"data": {"id": "ITEM1"}}
+
+        client.post = mock.Mock(side_effect=fake_post)
+        flows.submit_for_review(client, "APP", "V")
+        self.assertNotIn("/v1/reviewSubmissions", [p for p, _ in posts])
+        rel = posts[0][1]["data"]["relationships"]
+        self.assertEqual(rel["reviewSubmission"]["data"]["id"], "SUB9")
+        rel = posts[0][1]["data"]["relationships"]
+        self.assertEqual(rel["appStoreVersion"]["data"]["id"], "V")
+        path, body = client.patch.call_args[0]
+        self.assertEqual(path, "/v1/reviewSubmissions/SUB9")
+        self.assertEqual(body["data"]["attributes"], {"submitted": True})
+        client.delete.assert_not_called()
+
+    def test_pile_of_unsubmitted_submissions_is_collapsed(self):
+        client = self._client(
+            app_submissions=[
+                {"id": "SUB1", "attributes": {"platform": "MAC_OS", "submitted": False}},
+                {"id": "SUB2", "attributes": {"platform": "MAC_OS", "submitted": False}},
+                {"id": "SUB3", "attributes": {"platform": "MAC_OS", "submitted": False}},
+            ]
+        )
+        posts = []
+
+        def fake_post(path, body):
+            posts.append((path, body))
+            return {"data": {"id": "ITEM1"}}
+
+        client.post = mock.Mock(side_effect=fake_post)
+        flows.submit_for_review(client, "APP", "V")
+        # extras deleted, survivor reused, no new CREATE
+        client.delete.assert_any_call("/v1/reviewSubmissions/SUB2")
+        client.delete.assert_any_call("/v1/reviewSubmissions/SUB3")
+        self.assertEqual(client.delete.call_count, 2)
+        self.assertNotIn("/v1/reviewSubmissions", [p for p, _ in posts])
+        rel = posts[0][1]["data"]["relationships"]
+        self.assertEqual(rel["reviewSubmission"]["data"]["id"], "SUB1")
+
+    def test_pile_ignores_other_platform_and_already_submitted(self):
+        # Submitted resources are ASC's business (DELETE would fight a real
+        # submission) and other platforms are out of scope — neither may be
+        # reused or deleted.
+        client = self._client(
+            app_submissions=[
+                {"id": "SUBD", "attributes": {"platform": "MAC_OS", "submitted": True}},
+                {"id": "SUBI", "attributes": {"platform": "IOS", "submitted": False}},
+            ]
+        )
+        client.post = mock.Mock(return_value={"data": {"id": "SUB1", "attributes": {"state": "DRAFT"}}})
+        flows.submit_for_review(client, "APP", "V")
+        client.delete.assert_not_called()
+        create_calls = [c for c in client.post.call_args_list if c[0][0] == "/v1/reviewSubmissions"]
+        self.assertEqual(len(create_calls), 1)
 
 
 class CancelSubmissionTests(unittest.TestCase):
