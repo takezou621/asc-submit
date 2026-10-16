@@ -607,6 +607,26 @@ def _open_review_submission(client: Client, version_id: str) -> dict | None:
     return subs[0] if subs else None
 
 
+def _list_unsubmitted(client: Client, app_id: str, platform: str) -> list[dict]:
+    """Return the app's unsubmitted reviewSubmissions for one platform.
+
+    "Unsubmitted" = the developer has not PATCHed submitted: true yet. ASC
+    keeps at most ONE such resource per app+platform and still answers
+    DELETE on it. The platform filter is applied locally as well — a
+    mismatched platform resource must never be reused or deleted.
+    """
+    subs = client.get_all(
+        f"/v1/apps/{app_id}/reviewSubmissions",
+        {"filter[platform]": platform},
+    )
+    return [
+        s
+        for s in subs
+        if (s.get("attributes") or {}).get("platform") == platform
+        and not (s.get("attributes") or {}).get("submitted")
+    ]
+
+
 def _associated_details(err: ApiError) -> list[str]:
     """Human-readable details from an ASC "associatedErrors" rejection.
 
@@ -641,27 +661,47 @@ def submit_for_review(client: Client, app_id: str, version_id: str, platform: st
     """
     sub = _open_review_submission(client, version_id)
     if sub is None:
-        try:
-            sub = client.post(
-                "/v1/reviewSubmissions",
-                {
-                    "data": {
-                        "type": "reviewSubmissions",
-                        "attributes": {"platform": platform},
-                        "relationships": {
-                            "app": {"data": {"type": "apps", "id": app_id}}
-                        },
-                    }
-                },
-            )["data"]
-        except ApiError as err:
-            if err.status in {409, 422}:
-                # A submission may already exist (e.g. retried after a timeout).
-                sub = _open_review_submission(client, version_id)
-                if sub is None:
+        pile = _list_unsubmitted(client, app_id, platform)
+        if pile:
+            # A previous attempt can leave an unsubmitted submission behind:
+            # the CREATE succeeds but the item attach fails (e.g. 409
+            # "Asset upload is in progress" while screenshots process), and
+            # _open_review_submission only sees submissions that already
+            # carry this version as an item. ASC keeps exactly ONE
+            # unsubmitted submission per app+platform — every extra one makes
+            # all CREATEs and PATCHes answer a bare 409 "This resource cannot
+            # be reviewed" with no associatedErrors (eyechecker 2.9,
+            # 2026-10-15: five empty drafts stacked by a workflow's 5
+            # retries). Keep the first, DELETE the rest, and reuse the
+            # survivor instead of stacking another CREATE. If the survivor
+            # carried an item for a *different* version that version would be
+            # included in the submission — single-version workflows (the only
+            # kind these tools drive) never hit that.
+            sub = pile[0]
+            for extra in pile[1:]:
+                client.delete(f"/v1/reviewSubmissions/{extra['id']}")
+        else:
+            try:
+                sub = client.post(
+                    "/v1/reviewSubmissions",
+                    {
+                        "data": {
+                            "type": "reviewSubmissions",
+                            "attributes": {"platform": platform},
+                            "relationships": {
+                                "app": {"data": {"type": "apps", "id": app_id}}
+                            },
+                        }
+                    },
+                )["data"]
+            except ApiError as err:
+                if err.status in {409, 422}:
+                    # A submission may already exist (e.g. retried after a timeout).
+                    sub = _open_review_submission(client, version_id)
+                    if sub is None:
+                        raise
+                else:
                     raise
-            else:
-                raise
 
     # Attach the version as the item under review. A 409 here means the item
     # already exists (retry after a partial failure) — that is fine, the
