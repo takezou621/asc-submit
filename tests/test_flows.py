@@ -302,6 +302,62 @@ class SubmitForReviewTests(unittest.TestCase):
         create_calls = [c for c in client.post.call_args_list if c[0][0] == "/v1/reviewSubmissions"]
         self.assertEqual(len(create_calls), 1)
 
+    def test_terminal_submissions_without_submitted_flag_are_ignored(self):
+        # eyechecker 2.11 (2026-10-17): the v1 response no longer carries the
+        # `submitted` attribute, so ten COMPLETE submissions all looked
+        # unsubmitted — the collapse DELETE then answered 403 "does not
+        # allow 'DELETE'" and submit never proceeded. State must disqualify
+        # terminal submissions even without the flag.
+        client = self._client(
+            app_submissions=[
+                {"id": "SUBC", "attributes": {"platform": "IOS", "state": "COMPLETE"}},
+                {"id": "SUBW", "attributes": {"platform": "IOS", "state": "WAITING_FOR_REVIEW"}},
+                {"id": "SUBR", "attributes": {"platform": "IOS", "state": "REJECTED"}},
+            ]
+        )
+        client.post = mock.Mock(return_value={"data": {"id": "SUB1", "attributes": {"state": "DRAFT"}}})
+        flows.submit_for_review(client, "APP", "V", platform="IOS")
+        client.delete.assert_not_called()
+        create_calls = [c for c in client.post.call_args_list if c[0][0] == "/v1/reviewSubmissions"]
+        self.assertEqual(len(create_calls), 1)
+        rel = posts_first_item_relationships(client)
+        self.assertEqual(rel["reviewSubmission"]["data"]["id"], "SUB1")
+
+    def test_extra_delete_403_is_tolerated(self):
+        # ASC no longer answers DELETE on reviewSubmissions (2026-10-17).
+        # The collapse must keep going with the survivor instead of failing
+        # the whole submit.
+        client = self._client(
+            app_submissions=[
+                {"id": "SUB1", "attributes": {"platform": "IOS", "submitted": False}},
+                {"id": "SUB2", "attributes": {"platform": "IOS", "submitted": False}},
+            ]
+        )
+        client.delete = mock.Mock(
+            side_effect=ApiError(403, [{"title": "The resource 'reviewSubmissions' does not allow 'DELETE'."}])
+        )
+        posts = []
+
+        def fake_post(path, body):
+            posts.append((path, body))
+            return {"data": {"id": "ITEM1"}}
+
+        client.post = mock.Mock(side_effect=fake_post)
+        flows.submit_for_review(client, "APP", "V", platform="IOS")
+        path, body = client.patch.call_args[0]
+        self.assertEqual(path, "/v1/reviewSubmissions/SUB1")
+        self.assertEqual(body["data"]["attributes"], {"submitted": True})
+        rel = posts[0][1]["data"]["relationships"]
+        self.assertEqual(rel["reviewSubmission"]["data"]["id"], "SUB1")
+
+
+def posts_first_item_relationships(client):
+    """The reviewSubmissionItems POST's relationships (first one recorded)."""
+    for c in client.post.call_args_list:
+        if c[0][0] == "/v1/reviewSubmissionItems":
+            return c[0][1]["data"]["relationships"]
+    raise AssertionError("no reviewSubmissionItems POST recorded")
+
 
 class CancelSubmissionTests(unittest.TestCase):
     def test_cancels_via_review_submissions_when_present(self):
