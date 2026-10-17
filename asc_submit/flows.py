@@ -595,6 +595,22 @@ def set_screenshots(
 # submission
 
 
+# 提出が終端に達した state (提出済み・審査済み・中止)。これらは二度と
+# 再利用も削除もしない。 READY_FOR_REVIEW (作成済み・未提出) だけが
+# 再利用の対象
+TERMINAL_SUBMISSION_STATES = frozenset(
+    {
+        "COMPLETE",
+        "COMPLETION_ISSUES",
+        "CANCELLED",
+        "REJECTED",
+        "METADATA_REJECTED",
+        "IN_REVIEW",
+        "WAITING_FOR_REVIEW",
+    }
+)
+
+
 def _open_review_submission(client: Client, version_id: str) -> dict | None:
     """Return the version's reviewSubmission resource, if one exists."""
     try:
@@ -611,20 +627,30 @@ def _list_unsubmitted(client: Client, app_id: str, platform: str) -> list[dict]:
     """Return the app's unsubmitted reviewSubmissions for one platform.
 
     "Unsubmitted" = the developer has not PATCHed submitted: true yet. ASC
-    keeps at most ONE such resource per app+platform and still answers
-    DELETE on it. The platform filter is applied locally as well — a
-    mismatched platform resource must never be reused or deleted.
+    keeps at most ONE such resource per app+platform. The platform filter is
+    applied locally as well — a mismatched platform resource must never be
+    reused or deleted.
+
+    Terminal states are excluded by state as well: the `submitted` attribute
+    can vanish from the v1 response (eyechecker 2.11 submission, 2026-10-17 —
+    ten COMPLETE submissions all looked unsubmitted, and the collapse DELETE
+    then hit ASC's newly forbidden DELETE on reviewSubmissions).
     """
     subs = client.get_all(
         f"/v1/apps/{app_id}/reviewSubmissions",
         {"filter[platform]": platform},
     )
-    return [
-        s
-        for s in subs
-        if (s.get("attributes") or {}).get("platform") == platform
-        and not (s.get("attributes") or {}).get("submitted")
-    ]
+    unsubmitted = []
+    for s in subs:
+        attrs = s.get("attributes") or {}
+        if attrs.get("platform") != platform:
+            continue
+        if attrs.get("state") in TERMINAL_SUBMISSION_STATES:
+            continue
+        if attrs.get("submitted"):
+            continue
+        unsubmitted.append(s)
+    return unsubmitted
 
 
 def _associated_details(err: ApiError) -> list[str]:
@@ -679,7 +705,20 @@ def submit_for_review(client: Client, app_id: str, version_id: str, platform: st
             # kind these tools drive) never hit that.
             sub = pile[0]
             for extra in pile[1:]:
-                client.delete(f"/v1/reviewSubmissions/{extra['id']}")
+                try:
+                    client.delete(f"/v1/reviewSubmissions/{extra['id']}")
+                except ApiError as err:
+                    if err.status != 403:
+                        raise
+                    # ASC は reviewSubmissions の DELETE を許さなくなった
+                    # (2026-10-17 実測: 403 "does not allow 'DELETE'")。
+                    # 余りは残置して先へ進む — 再利用する pile[0] の提出には
+                    # 影響しない
+                    print(
+                        f"skipping DELETE of extra unsubmitted submission"
+                        f" {extra['id']} — ASC no longer allows DELETE",
+                        file=sys.stderr,
+                    )
         else:
             try:
                 sub = client.post(
