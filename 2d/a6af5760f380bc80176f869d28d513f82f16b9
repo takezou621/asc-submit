@@ -1,0 +1,16 @@
+asc_submit/flows.py
+  h_864205080385bc 598-613,630-637,643-653,708-721
+tests/test_flows.py
+  h_864205080385bc 305-360
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "2da6af5760f380bc80176f869d28d513f82f16b9",
+  "prompts": {},
+  "humans": {
+    "h_864205080385bc": {
+      "author": "takezou621 <takezou621@gmail.com>"
+    }
+  }
+}
