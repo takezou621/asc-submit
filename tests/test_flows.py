@@ -361,13 +361,27 @@ def posts_first_item_relationships(client):
 
 class CancelSubmissionTests(unittest.TestCase):
     def test_cancels_via_review_submissions_when_present(self):
+        # Modern submissions cancel via PATCH submitted: false. DELETE
+        # answers 403 since ASC forbade DELETE on reviewSubmissions
+        # (eyechecker 2.11 submission, 2026-10-17).
         client = FakeClient()
         client.get = mock.Mock(
             return_value={"data": [{"id": "SUB9", "attributes": {"state": "WAITING_FOR_REVIEW"}}]}
         )
         flows.cancel_submission(client, "V")
-        (path,) = client.delete.call_args[0]
+        client.delete.assert_not_called()
+        path, body = client.patch.call_args[0]
         self.assertEqual(path, "/v1/reviewSubmissions/SUB9")
+        self.assertEqual(
+            body,
+            {
+                "data": {
+                    "type": "reviewSubmissions",
+                    "id": "SUB9",
+                    "attributes": {"submitted": False},
+                }
+            },
+        )
 
     def test_legacy_fallback_when_no_review_submission(self):
         client = FakeClient()

@@ -46,11 +46,16 @@ in `flows.submit_for_review`:
 409/422 anywhere in that sequence means "already exists" (a retried run after
 a partial failure) and is tolerated — the flow is idempotent end to end.
 
-**Cancellation** still works on the legacy resource, but only with DELETE —
-`DELETE /v1/appStoreVersionSubmissions/{id}` — for versions submitted before
-the migration. Modern submissions cancel via
-`DELETE /v1/reviewSubmissions/{id}`. `cancel-submission` tries the modern
-resource first, falls back to legacy.
+**Cancellation**: legacy submissions (pre-migration versions) still cancel
+with DELETE — `DELETE /v1/appStoreVersionSubmissions/{id}`. Modern
+submissions cancel via `PATCH /v1/reviewSubmissions/{id}` with
+`attributes.submitted: false` — the mirror of submit's `submitted: true`.
+**`DELETE /v1/reviewSubmissions/{id}` stopped working on ~2026-10-17**: ASC
+now answers 403 "The resource 'reviewSubmissions' does not allow 'DELETE'"
+(eyechecker 2.11 submission — the same change made `submit_for_review`'s
+collapse DELETE fail. Apple's help doc requires the version to be in a
+cancellable state — WAITING_FOR_REVIEW, IN_REVIEW, etc. — and cancelling
+flips the version to DEVELOPER_REJECTED).
 
 ## The version's build relationship is to-one
 
