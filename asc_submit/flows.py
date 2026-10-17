@@ -812,7 +812,19 @@ def cancel_submission(client: Client, version_id: str) -> None:
             raise SystemExit("This version has no pending submission to cancel")
         client.delete(f"/v1/appStoreVersionSubmissions/{submission['id']}")
         return
-    client.delete(f"/v1/reviewSubmissions/{sub['id']}")
+    # Modern submissions cancel via PATCH submitted: false — the mirror of
+    # submit's PATCH submitted: true. DELETE answers 403 since ASC forbade
+    # DELETE on reviewSubmissions (eyechecker 2.11 submission, 2026-10-17).
+    client.patch(
+        f"/v1/reviewSubmissions/{sub['id']}",
+        {
+            "data": {
+                "type": "reviewSubmissions",
+                "id": sub["id"],
+                "attributes": {"submitted": False},
+            }
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
