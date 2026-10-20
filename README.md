@@ -373,6 +373,17 @@ Developer role. The role cannot be changed after creation; create an
 App Manager key at *Users and Access → Integrations* and update
 `ASC_KEY_PATH` / `ASC_KEY_ID` / `ASC_ISSUER`.
 
+Since 2026-10-17 ASC rejects **every** `DELETE` on `reviewSubmissions`
+(403 "does not allow 'DELETE'"), regardless of the key's role — an
+App Manager key is enough for the whole submit flow. `submit` and
+`cancel-submission` no longer depend on DELETE: `submit` reuses the
+surviving draft and leaves any extra unsubmitted drafts in place
+(warning on stderr), and `cancel-submission` flips `submitted: false`
+via PATCH. Leftover drafts cannot be removed through the API — delete
+them in the ASC web UI (the app's version page → *Add for Review* →
+draft submissions) if create/patch starts answering bare 409s
+(asc-submit#14).
+
 ## Limitations (v1)
 
 - Privacy labels ("nutrition" labels), pricing and availability are out of

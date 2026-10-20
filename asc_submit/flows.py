@@ -704,6 +704,17 @@ def submit_for_review(client: Client, app_id: str, version_id: str, platform: st
             # included in the submission — single-version workflows (the only
             # kind these tools drive) never hit that.
             sub = pile[0]
+            if len(pile) > 1:
+                # Early guidance (asc-submit#14 proposal 2): say up front that
+                # extras will remain, so the Web-UI cleanup step below is not
+                # a surprise buried mid-log.
+                print(
+                    f"warning: {len(pile)} unsubmitted reviewSubmissions — "
+                    f"reusing {sub['id']} and leaving the rest in place "
+                    "(the API can no longer delete them)",
+                    file=sys.stderr,
+                )
+            skipped: list[str] = []
             for extra in pile[1:]:
                 try:
                     client.delete(f"/v1/reviewSubmissions/{extra['id']}")
@@ -714,11 +725,26 @@ def submit_for_review(client: Client, app_id: str, version_id: str, platform: st
                     # (2026-10-17 実測: 403 "does not allow 'DELETE'")。
                     # 余りは残置して先へ進む — 再利用する pile[0] の提出には
                     # 影響しない
+                    skipped.append(str(extra["id"]))
                     print(
                         f"skipping DELETE of extra unsubmitted submission"
                         f" {extra['id']} — ASC no longer allows DELETE",
                         file=sys.stderr,
                     )
+            if skipped:
+                # asc-submit#14 proposal 1: the operator needs to know the
+                # drafts survive and where only they can remove them. A pile
+                # of empty drafts used to surface later as bare 409s on every
+                # CREATE/PATCH (eyechecker 2.9, 2026-10-15), so the hint says
+                # what symptom the cleanup prevents.
+                print(
+                    "leftover draft submission(s) stay in ASC: "
+                    + ", ".join(skipped)
+                    + " — remove them in App Store Connect (the app's "
+                    "version page → Add for Review → draft submissions) if "
+                    "create/patch starts answering bare 409s",
+                    file=sys.stderr,
+                )
         else:
             try:
                 sub = client.post(

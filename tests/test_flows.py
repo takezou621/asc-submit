@@ -1,3 +1,4 @@
+import io
 import unittest
 from unittest import mock
 
@@ -343,12 +344,22 @@ class SubmitForReviewTests(unittest.TestCase):
             return {"data": {"id": "ITEM1"}}
 
         client.post = mock.Mock(side_effect=fake_post)
-        flows.submit_for_review(client, "APP", "V", platform="IOS")
+        stderr = io.StringIO()
+        with mock.patch("sys.stderr", stderr):
+            flows.submit_for_review(client, "APP", "V", platform="IOS")
         path, body = client.patch.call_args[0]
         self.assertEqual(path, "/v1/reviewSubmissions/SUB1")
         self.assertEqual(body["data"]["attributes"], {"submitted": True})
         rel = posts[0][1]["data"]["relationships"]
         self.assertEqual(rel["reviewSubmission"]["data"]["id"], "SUB1")
+        # asc-submit#14 proposals 1 & 2: the leftover draft and its only
+        # removal path (the web UI) must be called out, not buried in a bare
+        # 403 note.
+        output = stderr.getvalue()
+        self.assertIn("2 unsubmitted reviewSubmissions", output)
+        self.assertIn("skipping DELETE of extra unsubmitted submission SUB2", output)
+        self.assertIn("leftover draft submission(s) stay in ASC: SUB2", output)
+        self.assertIn("remove them in App Store Connect", output)
 
 
 def posts_first_item_relationships(client):
