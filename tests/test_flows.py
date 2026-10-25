@@ -55,7 +55,7 @@ class FakeClient(mock.Mock):
             return []  # create_version resolves first; empty = does not exist yet
         if path == "/v1/apps/APP/reviewSubmissions":
             return self._app_submissions
-        if path.startswith("/v1/reviewSubmissions/") and path.endswith("/reviewSubmissionItems"):
+        if path.startswith("/v1/reviewSubmissions/") and path.endswith("/items"):
             sub_id = path.split("/")[3]
             return self._submission_items.get(sub_id, [])
         if path == "/v1/apps/APP/appInfos":
@@ -414,6 +414,31 @@ class SubmitForReviewTests(unittest.TestCase):
         self.assertIn("protecting extra unsubmitted submission SUB1", output)
         self.assertIn("version(s) OTHER", output)
         self.assertIn("protected draft submission(s) stay in ASC: SUB1", output)
+
+    def test_draft_grouping_this_and_another_version_is_not_reused(self):
+        # 自バージョンを含んでいても、他バージョンも束ねる草稿を再利用すると
+        # submitted: true の時点でその他バージョンも一緒に提出される。
+        # 安全な空草稿があるときはそれを再利用し、mix 草稿は保護する。
+        client = self._client(
+            app_submissions=[
+                {"id": "SUB1", "attributes": {"platform": "MAC_OS", "submitted": False}},
+                {"id": "SUB2", "attributes": {"platform": "MAC_OS", "submitted": False}},
+            ],
+            submission_items={
+                "SUB1": [review_item("SUB1", "V"), review_item("SUB1", "OTHER")]
+            },
+        )
+        posts = []
+
+        def fake_post(path, body):
+            posts.append((path, body))
+            return {"data": {"id": "ITEM1"}}
+
+        client.post = mock.Mock(side_effect=fake_post)
+        flows.submit_for_review(client, "APP", "V")
+        rel = posts[0][1]["data"]["relationships"]
+        self.assertEqual(rel["reviewSubmission"]["data"]["id"], "SUB2")
+        client.delete.assert_not_called()
 
     def test_all_drafts_bound_to_other_versions_fails_explicitly(self):
         # asc-submit#13 proposal 2: with no item-less draft and none grouping

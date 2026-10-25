@@ -661,9 +661,7 @@ def _submission_item_versions(client: Client, submission_id: str) -> list[str | 
     読めないものは None を返し、呼び出し側は安全側 (束ね先不明の item あり)
     として扱う — 空と誤認すると他バージョンの草稿を再利用・削除に巻き込める。
     """
-    items = client.get_all(
-        f"/v1/reviewSubmissions/{submission_id}/reviewSubmissionItems"
-    )
+    items = client.get_all(f"/v1/reviewSubmissions/{submission_id}/items")
     versions: list[str | None] = []
     for item in items:
         rel = (item.get("relationships") or {}).get("appStoreVersion") or {}
@@ -725,8 +723,10 @@ def submit_for_review(client: Client, app_id: str, version_id: str, platform: st
             # CREATE — but which one is safe depends on its items
             # (asc-submit#13): a draft that already groups review items may
             # belong to ANOTHER version in multi-version operation.
-            #   - groups THIS version  → reuse (second chance at the
-            #     version-linked lookup, which eventual consistency can miss)
+            #   - groups ONLY this version → reuse (second chance at the
+            #     version-linked lookup, which eventual consistency can miss.
+            #     複数バージョンを束ねる草稿は自バージョンを含んでいても再利用
+            #     しない — submitted: true にすると他バージョンも一緒に提出される)
             #   - no items             → safe to reuse and to DELETE
             #   - groups other version → protected: never deleted (that
             #     would destroy the other version's grouping) and never
@@ -740,7 +740,7 @@ def submit_for_review(client: Client, app_id: str, version_id: str, platform: st
                     empties.append(candidate)
                 else:
                     carriers[candidate["id"]] = versions
-                    if version_id in versions:
+                    if all(v == version_id for v in versions):
                         ours = candidate
             if ours is not None:
                 sub = ours
