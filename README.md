@@ -384,6 +384,13 @@ them in the ASC web UI (the app's version page → *Add for Review* →
 draft submissions) if create/patch starts answering bare 409s
 (asc-submit#14).
 
+The pile cleanup is item-aware (asc-submit#13): an unsubmitted draft that
+already groups review items for **other** versions is neither reused
+(submitting it would submit those versions too) nor deleted, and when no
+safe draft remains `submit` fails with the list of grouped versions —
+finish or remove those versions' draft submissions in the web UI first.
+Item-less drafts are reused and collapsed as before.
+
 ## Limitations (v1)
 
 - Privacy labels ("nutrition" labels), pricing and availability are out of
