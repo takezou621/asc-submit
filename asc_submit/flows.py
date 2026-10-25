@@ -653,6 +653,29 @@ def _list_unsubmitted(client: Client, app_id: str, platform: str) -> list[dict]:
     return unsubmitted
 
 
+def _submission_item_versions(client: Client, submission_id: str) -> list[str | None]:
+    """Return the appStoreVersion ids one reviewSubmission groups (its items).
+
+    未提出 submission を再利用・削除してよいかは「その草稿が既にどのバージョンを
+    item として束ねているか」で決まる (asc-submit#13)。item の関係 linkage が
+    読めないものは None を返し、呼び出し側は安全側 (束ね先不明の item あり)
+    として扱う — 空と誤認すると他バージョンの草稿を再利用・削除に巻き込める。
+    """
+    items = client.get_all(
+        f"/v1/reviewSubmissions/{submission_id}/reviewSubmissionItems"
+    )
+    versions: list[str | None] = []
+    for item in items:
+        rel = (item.get("relationships") or {}).get("appStoreVersion") or {}
+        data = rel.get("data") or {}
+        versions.append(data.get("id"))
+    return versions
+
+
+def _display_versions(versions: list[str | None]) -> str:
+    return ", ".join(v or "(unknown)" for v in versions)
+
+
 def _associated_details(err: ApiError) -> list[str]:
     """Human-readable details from an ASC "associatedErrors" rejection.
 
@@ -698,12 +721,48 @@ def submit_for_review(client: Client, app_id: str, version_id: str, platform: st
             # all CREATEs and PATCHes answer a bare 409 "This resource cannot
             # be reviewed" with no associatedErrors (eyechecker 2.9,
             # 2026-10-15: five empty drafts stacked by a workflow's 5
-            # retries). Keep the first, DELETE the rest, and reuse the
-            # survivor instead of stacking another CREATE. If the survivor
-            # carried an item for a *different* version that version would be
-            # included in the submission — single-version workflows (the only
-            # kind these tools drive) never hit that.
-            sub = pile[0]
+            # retries). Reuse one survivor instead of stacking another
+            # CREATE — but which one is safe depends on its items
+            # (asc-submit#13): a draft that already groups review items may
+            # belong to ANOTHER version in multi-version operation.
+            #   - groups THIS version  → reuse (second chance at the
+            #     version-linked lookup, which eventual consistency can miss)
+            #   - no items             → safe to reuse and to DELETE
+            #   - groups other version → protected: never deleted (that
+            #     would destroy the other version's grouping) and never
+            #     reused (submitting it would submit those versions too)
+            carriers: dict[str, list[str | None]] = {}
+            empties: list[dict] = []
+            ours: dict | None = None
+            for candidate in pile:
+                versions = _submission_item_versions(client, candidate["id"])
+                if not versions:
+                    empties.append(candidate)
+                else:
+                    carriers[candidate["id"]] = versions
+                    if version_id in versions:
+                        ours = candidate
+            if ours is not None:
+                sub = ours
+            elif empties:
+                sub = empties[0]
+            else:
+                # asc-submit#13 提案 2: 再利用できる安全な草稿が無く、CREATE も
+                # 「1 app+platform に 1 未提出」制で 409 になるしかない。黙って
+                # 他バージョンを束ねたまま提出するのが最悪の結果なので、失敗させる
+                raise SystemExit(
+                    "every unsubmitted reviewSubmission for this platform "
+                    "already groups other version(s): "
+                    + "; ".join(
+                        f"{sid} → {_display_versions(vs)}"
+                        for sid, vs in carriers.items()
+                    )
+                    + ". Reusing one would submit those versions with this "
+                    "one, and ASC allows only one unsubmitted submission per "
+                    "app and platform. Submit or remove those versions' draft "
+                    "submissions in App Store Connect first (the app's "
+                    "version page → Add for Review → draft submissions)."
+                )
             if len(pile) > 1:
                 # Early guidance (asc-submit#14 proposal 2): say up front that
                 # extras will remain, so the Web-UI cleanup step below is not
@@ -715,7 +774,23 @@ def submit_for_review(client: Client, app_id: str, version_id: str, platform: st
                     file=sys.stderr,
                 )
             skipped: list[str] = []
-            for extra in pile[1:]:
+            protected: list[str] = []
+            for extra in pile:
+                if extra["id"] == sub["id"]:
+                    continue
+                if extra["id"] in carriers:
+                    # asc-submit#13 提案 1: item 付きの余分は別バージョンの草稿の
+                    # 可能性 — API が DELETE を許す日が来ても消さない (403 許容の
+                    # 偶然ではなく意図として保護する)
+                    protected.append(str(extra["id"]))
+                    print(
+                        f"protecting extra unsubmitted submission {extra['id']} "
+                        f"— it groups review items for version(s) "
+                        f"{_display_versions(carriers[extra['id']])} "
+                        "(another version's draft; not reusing or deleting it)",
+                        file=sys.stderr,
+                    )
+                    continue
                 try:
                     client.delete(f"/v1/reviewSubmissions/{extra['id']}")
                 except ApiError as err:
@@ -743,6 +818,17 @@ def submit_for_review(client: Client, app_id: str, version_id: str, platform: st
                     + " — remove them in App Store Connect (the app's "
                     "version page → Add for Review → draft submissions) if "
                     "create/patch starts answering bare 409s",
+                    file=sys.stderr,
+                )
+            if protected:
+                # 保護した草稿も ASC に残る — どのバージョンの草稿かを一覧して、
+                # 複数バージョン運用のオペレーターが他バージョンの提出時に
+                # 「消えた/巻き込まれた」と誤解しないようにする
+                print(
+                    "protected draft submission(s) stay in ASC: "
+                    + ", ".join(protected)
+                    + " — they group other version(s); finish or remove "
+                    "those versions' submissions in App Store Connect",
                     file=sys.stderr,
                 )
         else:

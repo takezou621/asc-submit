@@ -10,6 +10,21 @@ def localization(loc_id, locale, **attrs):
     return {"id": loc_id, "attributes": {"locale": locale, **attrs}}
 
 
+def review_item(submission_id, version_id):
+    """reviewSubmissionItems のリソース (asc-submit#13 の pile 分類が読む形)。"""
+    return {
+        "id": f"ITEM-{submission_id}-{version_id}",
+        "relationships": {
+            "reviewSubmission": {
+                "data": {"type": "reviewSubmissions", "id": submission_id}
+            },
+            "appStoreVersion": {
+                "data": {"type": "appStoreVersions", "id": version_id}
+            },
+        },
+    }
+
+
 class FakeClient(mock.Mock):
     """Client double that answers the handful of GETs the flows issue."""
 
@@ -21,6 +36,9 @@ class FakeClient(mock.Mock):
         self._app_info_localizations = app_info_localizations or {}
         # submit_for_review の app レベル reviewSubmissions 一覧 (空 = 未提出なし)
         self._app_submissions = []
+        # reviewSubmission id -> item リソース (asc-submit#13 の pile 分類。
+        # 無登録 = item なしの空草稿)
+        self._submission_items = {}
         self.patched = []
         self.posted = []
         self.get_all = mock.Mock(side_effect=self._get_all)
@@ -37,6 +55,9 @@ class FakeClient(mock.Mock):
             return []  # create_version resolves first; empty = does not exist yet
         if path == "/v1/apps/APP/reviewSubmissions":
             return self._app_submissions
+        if path.startswith("/v1/reviewSubmissions/") and path.endswith("/reviewSubmissionItems"):
+            sub_id = path.split("/")[3]
+            return self._submission_items.get(sub_id, [])
         if path == "/v1/apps/APP/appInfos":
             return self._app_infos
         if "/appInfoLocalizations" in path:
@@ -127,9 +148,10 @@ class SubmitForReviewTests(unittest.TestCase):
     """The reviewSubmissions flow (the legacy appStoreVersionSubmissions POST
     is deprecated: 403 "Allowed operation is: DELETE" — kilde run 36284583404)."""
 
-    def _client(self, existing=None, app_submissions=()):
+    def _client(self, existing=None, app_submissions=(), submission_items=None):
         client = FakeClient()
         client._app_submissions = list(app_submissions)
+        client._submission_items = submission_items or {}
         # GET reviewSubmissions for the version → existing (or 404-equivalent [])
         client.get = mock.Mock(return_value={"data": existing or []})
         return client
@@ -360,6 +382,81 @@ class SubmitForReviewTests(unittest.TestCase):
         self.assertIn("skipping DELETE of extra unsubmitted submission SUB2", output)
         self.assertIn("leftover draft submission(s) stay in ASC: SUB2", output)
         self.assertIn("remove them in App Store Connect", output)
+
+
+    def test_item_bearing_extra_is_protected_and_itemless_is_preferred(self):
+        # asc-submit#13: a draft that groups another version's review item
+        # must be neither deleted (that would destroy the other version's
+        # grouping — proposal 1) nor reused (submitting it would submit that
+        # version with ours). The item-less draft is the safe survivor even
+        # when the carrier comes first in the pile.
+        client = self._client(
+            app_submissions=[
+                {"id": "SUB1", "attributes": {"platform": "MAC_OS", "submitted": False}},
+                {"id": "SUB2", "attributes": {"platform": "MAC_OS", "submitted": False}},
+            ],
+            submission_items={"SUB1": [review_item("SUB1", "OTHER")]},
+        )
+        posts = []
+
+        def fake_post(path, body):
+            posts.append((path, body))
+            return {"data": {"id": "ITEM1"}}
+
+        client.post = mock.Mock(side_effect=fake_post)
+        stderr = io.StringIO()
+        with mock.patch("sys.stderr", stderr):
+            flows.submit_for_review(client, "APP", "V")
+        rel = posts[0][1]["data"]["relationships"]
+        self.assertEqual(rel["reviewSubmission"]["data"]["id"], "SUB2")
+        client.delete.assert_not_called()
+        output = stderr.getvalue()
+        self.assertIn("protecting extra unsubmitted submission SUB1", output)
+        self.assertIn("version(s) OTHER", output)
+        self.assertIn("protected draft submission(s) stay in ASC: SUB1", output)
+
+    def test_all_drafts_bound_to_other_versions_fails_explicitly(self):
+        # asc-submit#13 proposal 2: with no item-less draft and none grouping
+        # this version, any reuse would submit the other versions — fail with
+        # the grouped versions instead of submitting the wrong thing.
+        client = self._client(
+            app_submissions=[
+                {"id": "SUB1", "attributes": {"platform": "IOS", "submitted": False}}
+            ],
+            submission_items={"SUB1": [review_item("SUB1", "OTHER1")]},
+        )
+        stderr = io.StringIO()
+        with mock.patch("sys.stderr", stderr), self.assertRaises(SystemExit) as ctx:
+            flows.submit_for_review(client, "APP", "V", platform="IOS")
+        message = str(ctx.exception)
+        self.assertIn("SUB1", message)
+        self.assertIn("OTHER1", message)
+        self.assertIn("App Store Connect", message)
+        client.patch.assert_not_called()
+        client.delete.assert_not_called()
+
+    def test_draft_grouping_this_version_is_reused_even_if_listed_second(self):
+        # The version-linked lookup can miss under eventual consistency; the
+        # item scan is the second chance to find our own draft, and an empty
+        # extra is still collapsed the traditional way.
+        client = self._client(
+            app_submissions=[
+                {"id": "SUB1", "attributes": {"platform": "MAC_OS", "submitted": False}},
+                {"id": "SUB2", "attributes": {"platform": "MAC_OS", "submitted": False}},
+            ],
+            submission_items={"SUB2": [review_item("SUB2", "V")]},
+        )
+        posts = []
+
+        def fake_post(path, body):
+            posts.append((path, body))
+            return {"data": {"id": "ITEM1"}}
+
+        client.post = mock.Mock(side_effect=fake_post)
+        flows.submit_for_review(client, "APP", "V")
+        rel = posts[0][1]["data"]["relationships"]
+        self.assertEqual(rel["reviewSubmission"]["data"]["id"], "SUB2")
+        client.delete.assert_any_call("/v1/reviewSubmissions/SUB1")
 
 
 def posts_first_item_relationships(client):
