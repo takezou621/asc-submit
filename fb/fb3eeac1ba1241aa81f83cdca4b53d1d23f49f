@@ -1,0 +1,18 @@
+README.md
+  h_864205080385bc 387-393
+asc_submit/flows.py
+  h_864205080385bc 656-678,724-765,777-793,823-833
+tests/test_flows.py
+  h_864205080385bc 13-27,39-41,58-60,151,154,387-461
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "fbfb3eeac1ba1241aa81f83cdca4b53d1d23f49f",
+  "prompts": {},
+  "humans": {
+    "h_864205080385bc": {
+      "author": "takezou621 <takezou621@gmail.com>"
+    }
+  }
+}
