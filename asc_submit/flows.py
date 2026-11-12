@@ -251,8 +251,12 @@ def set_localizations(
                 {"data": {"type": "appStoreVersionLocalizations", "id": existing[locale]['id'], "attributes": attrs}},
             )
         else:
+            # New locales are created through the **top-level** POST. The nested
+            # route (POST /v1/appStoreVersions/{id}/appStoreVersionLocalizations)
+            # answers 405 METHOD_NOT_ALLOWED since the 2026-11 API change
+            # (eyechecker#205, observed live during the 2.33 submission).
             client.post(
-                f"/v1/appStoreVersions/{version_id}/appStoreVersionLocalizations",
+                "/v1/appStoreVersionLocalizations",
                 {
                     "data": {
                         "type": "appStoreVersionLocalizations",
@@ -344,8 +348,11 @@ def set_app_info_fields(
                 {"data": {"type": "appInfoLocalizations", "id": existing[locale]['id'], "attributes": attrs}},
             )
         else:
+            # Top-level POST — the nested route answers 405 since the 2026-11
+            # API change (eyechecker#205, observed live during the 2.33
+            # submission; same change as version localizations above).
             client.post(
-                f"/v1/appInfos/{info['id']}/appInfoLocalizations",
+                "/v1/appInfoLocalizations",
                 {
                     "data": {
                         "type": "appInfoLocalizations",
