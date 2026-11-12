@@ -84,13 +84,19 @@ class SetLocalizationsKeywordsTests(unittest.TestCase):
         self.assertEqual(body["data"]["attributes"], {"keywords": "a,b,c"})
         self.assertFalse(client.posted)
 
-    def test_missing_locale_is_posted(self):
+    def test_missing_locale_is_posted_top_level(self):
+        # New locales are created via the top-level POST; the nested route
+        # answers 405 since the 2026-11 API change (eyechecker#205).
         client = FakeClient(version_localizations=[])
         flows.set_localizations(client, "V", keywords={"ja": "a,b"})
         self.assertEqual(len(client.posted), 1)
         path, body = client.posted[0]
-        self.assertEqual(path, "/v1/appStoreVersions/V/appStoreVersionLocalizations")
+        self.assertEqual(path, "/v1/appStoreVersionLocalizations")
         self.assertEqual(body["data"]["attributes"], {"locale": "ja", "keywords": "a,b"})
+        self.assertEqual(
+            body["data"]["relationships"],
+            {"appStoreVersion": {"data": {"type": "appStoreVersions", "id": "V"}}},
+        )
         self.assertFalse(client.patched)
 
     def test_over_100_characters_is_rejected_before_any_write(self):
@@ -549,13 +555,19 @@ class SetSubtitlesTests(unittest.TestCase):
         self.assertEqual(path, "/v1/appInfoLocalizations/AL1")
         self.assertEqual(body["data"]["attributes"], {"subtitle": "新しいサブタイトル"})
 
-    def test_missing_locale_is_posted_on_the_editable_app_info(self):
+    def test_missing_locale_is_posted_top_level(self):
+        # New locales are created via the top-level POST; the nested route
+        # answers 405 since the 2026-11 API change (eyechecker#205).
         client = self._client()
         flows.set_subtitles(client, "APP", {"en-US": "Record & transcribe"})
         self.assertEqual(len(client.posted), 1)
         path, body = client.posted[0]
-        self.assertEqual(path, "/v1/appInfos/INFO_EDIT/appInfoLocalizations")
+        self.assertEqual(path, "/v1/appInfoLocalizations")
         self.assertEqual(body["data"]["attributes"], {"locale": "en-US", "subtitle": "Record & transcribe"})
+        self.assertEqual(
+            body["data"]["relationships"],
+            {"appInfo": {"data": {"type": "appInfos", "id": "INFO_EDIT"}}},
+        )
 
     def test_rejected_states_count_as_editable(self):
         for state in ("REJECTED", "DEVELOPER_REJECTED", "METADATA_REJECTED", "WAITING_FOR_EXPORT_COMPLIANCE"):
